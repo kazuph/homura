@@ -273,6 +273,18 @@ class Homura
     @routes[["POST", path]] = block
   end
 
+  def put(path, &block)
+    @routes[["PUT", path]] = block
+  end
+
+  def patch(path, &block)
+    @routes[["PATCH", path]] = block
+  end
+
+  def delete(path, &block)
+    @routes[["DELETE", path]] = block
+  end
+
   def match_route(method, path)
     path_parts = path.split("/").reject { |p| p.empty? }
     @routes.each do |(route_method, pattern), handler|
@@ -323,6 +335,17 @@ class Context
   def initialize(env, params)
     @env = env
     @params = params
+  end
+
+  def body
+    @env[:body] || ""
+  end
+
+  def json_body
+    body_str = body
+    return {} if body_str.nil? || body_str.empty?
+    # Return raw body string for now - parsing can be done in C
+    body_str
   end
 
   def json(data, status: 200)
@@ -410,6 +433,83 @@ class Object
     else "\\"" + self.to_s + "\\""
     end
   end
+end
+
+# Simple JSON parser (basic implementation for request bodies)
+# Note: mruby has limited regex support, so we use string operations
+def parse_json(str)
+  return {} if str.nil? || str.empty?
+  str = str.strip
+  return nil if str == "null"
+  return true if str == "true"
+  return false if str == "false"
+
+  # Check if it's a number
+  if str.length > 0 && (str[0] == "-" || (str[0] >= "0" && str[0] <= "9"))
+    if str.include?(".")
+      return str.to_f
+    else
+      return str.to_i
+    end
+  end
+
+  # String value
+  if str.start_with?("\\"") && str.end_with?("\\"")
+    return str[1..-2]
+  end
+
+  # Object - simple key-value parsing
+  if str.start_with?("{") && str.end_with?("}")
+    result = {}
+    content = str[1..-2].strip
+    return result if content.empty?
+
+    # Parse key-value pairs
+    pairs = []
+    depth = 0
+    current = ""
+    content.each_char do |c|
+      if c == "{" || c == "["
+        depth += 1
+        current << c
+      elsif c == "}" || c == "]"
+        depth -= 1
+        current << c
+      elsif c == "," && depth == 0
+        pairs << current.strip
+        current = ""
+      else
+        current << c
+      end
+    end
+    pairs << current.strip unless current.empty?
+
+    pairs.each do |pair|
+      # Find the colon separator
+      colon_idx = nil
+      in_string = false
+      pair.each_char.with_index do |c, i|
+        if c == "\\"" && (i == 0 || pair[i-1] != "\\\\")
+          in_string = !in_string
+        elsif c == ":" && !in_string
+          colon_idx = i
+          break
+        end
+      end
+
+      if colon_idx
+        key_part = pair[0...colon_idx].strip
+        val_part = pair[(colon_idx+1)..-1].strip
+        if key_part.start_with?("\\"") && key_part.end_with?("\\"")
+          key = key_part[1..-2].to_sym
+          result[key] = parse_json(val_part)
+        end
+      end
+    end
+    return result
+  end
+
+  str
 end
 
 $app = Homura.new
@@ -535,6 +635,26 @@ $app.get "/health" do |c|
   c.json({ status: "ok", runtime: "cloudflare-workers", engine: "mruby" })
 end
 
+# POST example - create user
+$app.post "/users" do |c|
+  c.json({ action: "create", body: c.body }, status: 201)
+end
+
+# PUT example - update user
+$app.put "/users/:id" do |c|
+  c.json({ action: "update", user_id: c.params[:id], body: c.body })
+end
+
+# PATCH example - partial update
+$app.patch "/users/:id" do |c|
+  c.json({ action: "patch", user_id: c.params[:id], body: c.body })
+end
+
+# DELETE example - delete user
+$app.delete "/users/:id" do |c|
+  c.json({ action: "delete", user_id: c.params[:id] })
+end
+
 $app.get "/assets/app.css" do |c|
   c.css(APP_CSS)
 end
@@ -563,11 +683,24 @@ export default {
         coreLoaded = true;
       }
 
+      // Read request body for POST/PUT/PATCH
+      let bodyStr = '';
+      if (['POST', 'PUT', 'PATCH'].includes(request.method)) {
+        bodyStr = await request.text();
+      }
+
+      // Escape body for Ruby string (handle quotes and backslashes)
+      const escapedBody = bodyStr
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r');
+
       // Call Ruby router using eval
       // Note: Don't call to_json here - let C's value_to_json handle serialization
       // to avoid double-encoding (Ruby to_json returns string, C wraps in quotes again)
       const envCode = `
-        env = { method: "${request.method}", path: "${url.pathname}" }
+        env = { method: "${request.method}", path: "${url.pathname}", body: "${escapedBody}" }
         $app.call(env)
       `;
 
