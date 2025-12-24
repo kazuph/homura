@@ -7,6 +7,7 @@
 import mrubyWasm from '../../../mruby/build/mruby.wasm';
 import { renderTemplate } from './templates.tsx';
 import { HOMURA_CORE, USER_ROUTES } from './ruby-bundle';
+import { APP_CSS } from './styles-bundle';
 
 // Longjmp exception class for wasm-sjlj
 class WasmLongjmpException {
@@ -267,6 +268,13 @@ let coreLoaded = false;
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    // Serve static assets directly (CSS)
+    if (url.pathname === '/assets/app.css') {
+      return new Response(APP_CSS, {
+        headers: { 'Content-Type': 'text/css' },
+      });
+    }
 
     try {
       if (!mruby) {
