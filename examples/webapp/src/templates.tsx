@@ -1,4 +1,4 @@
-import { renderToString } from './jsx/render';
+import { renderToString } from './lib/render';
 
 type TemplateLocals = Record<string, string>;
 
