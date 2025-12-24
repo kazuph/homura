@@ -52,6 +52,7 @@ const Home = ({
   template_note,
   web_note,
   hono_note,
+  counter,
 }: TemplateLocals) => (
   <>
     <section className="hero">
@@ -67,6 +68,22 @@ const Home = ({
         </a>
       </div>
     </section>
+
+    <section className="counter-section">
+      <div className="counter-card">
+        <h2>KV カウンター</h2>
+        <p className="counter-desc">Cloudflare KV を使った永続カウンター</p>
+        <div className="counter-display">
+          <span id="counter-value">{counter || '0'}</span>
+        </div>
+        <div className="counter-actions">
+          <button id="btn-increment" className="button">+1 カウント</button>
+          <button id="btn-reset" className="button ghost">リセット</button>
+        </div>
+        <p id="counter-status" className="counter-status"></p>
+      </div>
+    </section>
+
     <section className="grid">
       <div className="card">
         <h3>テンプレート</h3>
@@ -81,6 +98,42 @@ const Home = ({
         <p>{hono_note}</p>
       </div>
     </section>
+
+    <script dangerouslySetInnerHTML={{ __html: `
+      (function() {
+        const counterEl = document.getElementById('counter-value');
+        const statusEl = document.getElementById('counter-status');
+        const btnIncrement = document.getElementById('btn-increment');
+        const btnReset = document.getElementById('btn-reset');
+
+        async function increment() {
+          statusEl.textContent = '...';
+          try {
+            const res = await fetch('/counter');
+            const data = await res.json();
+            counterEl.textContent = data.count;
+            statusEl.textContent = data.message;
+          } catch (e) {
+            statusEl.textContent = 'エラー: ' + e.message;
+          }
+        }
+
+        async function reset() {
+          statusEl.textContent = '...';
+          try {
+            const res = await fetch('/counter/reset', { method: 'POST' });
+            const data = await res.json();
+            counterEl.textContent = data.count;
+            statusEl.textContent = data.message;
+          } catch (e) {
+            statusEl.textContent = 'エラー: ' + e.message;
+          }
+        }
+
+        btnIncrement.addEventListener('click', increment);
+        btnReset.addEventListener('click', reset);
+      })();
+    ` }} />
   </>
 );
 

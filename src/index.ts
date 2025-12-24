@@ -623,9 +623,58 @@ a { color: inherit; text-decoration: none; }
   color: var(--muted);
   font-size: 12px;
 }
+
+/* Counter Section */
+.counter-section {
+  padding: 32px 0;
+  display: flex;
+  justify-content: center;
+}
+.counter-card {
+  background: var(--card);
+  border-radius: 24px;
+  padding: 32px 48px;
+  box-shadow: 0 10px 40px var(--shadow);
+  text-align: center;
+  min-width: 320px;
+}
+.counter-card h2 {
+  margin: 0 0 8px;
+  color: var(--accent);
+}
+.counter-desc {
+  color: var(--muted);
+  font-size: 14px;
+  margin: 0 0 24px;
+}
+.counter-display {
+  font-size: 72px;
+  font-weight: 700;
+  color: var(--accent-2);
+  margin: 16px 0;
+  font-feature-settings: "tnum";
+}
+.counter-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  margin-top: 16px;
+}
+.counter-actions button {
+  cursor: pointer;
+  border: none;
+  font-size: 16px;
+}
+.counter-status {
+  margin-top: 16px;
+  font-size: 14px;
+  color: var(--muted);
+  min-height: 20px;
+}
 CSS
 
 $app.get "/" do |c|
+  current_count = c.kv_get("counter") || "0"
   c.jsx(
     "home",
     {
@@ -634,7 +683,8 @@ $app.get "/" do |c|
       lead: "APIだけでなく静的ページも素早く返す、Hono風のRuby DSLです。",
       template_note: "JSXテンプレで軽量にHTMLを組み立て。",
       web_note: "CSSやHTMLを同梱して小さなWebに最適。",
-      hono_note: "get/post + Context APIでHono互換の使い心地。"
+      hono_note: "get/post + Context APIでHono互換の使い心地。",
+      counter: current_count
     }
   )
 end
@@ -740,6 +790,7 @@ interface Env {
 
 // KV prefetch configuration - which keys to load for which route patterns
 const KV_PREFETCH_CONFIG: Record<string, string[]> = {
+  '/': ['counter'],
   '/counter': ['counter'],
 };
 
