@@ -9,3 +9,9 @@ command = "npm run build:mruby"
 [[rules]]
 type = "CompiledWasm"
 globs = ["**/*.wasm"]
+
+# KV namespace binding
+[[kv_namespaces]]
+binding = "HOMURA_KV"
+id = "acd9b62f44b04336b1d16d4fdbd86326"
+preview_id = "4a4946ebb0d34ffd98b30a3a9d6f2b5e"

@@ -222,16 +222,22 @@ class MRuby {
     new Uint8Array(memory.buffer).set(codeBytes, bufferPtr);
 
     // Evaluate Ruby code (wrapped to catch wasm-sjlj longjmp)
+    let evalError: string | null = null;
     try {
       exports.homura_eval();
     } catch (e) {
       if (e instanceof WasmLongjmpException) {
         // longjmp was called - this typically means an exception was thrown in Ruby
-        // For now, just continue and try to get the result
-        console.log('[homura] longjmp caught in eval, buf:', e.buf, 'value:', e.value);
+        console.error('[homura] Ruby exception (longjmp), buf:', e.buf, 'value:', e.value);
+        evalError = `Ruby exception occurred (longjmp value: ${e.value})`;
       } else {
         throw e;
       }
+    }
+
+    // If eval failed, return error JSON
+    if (evalError) {
+      return JSON.stringify({ status: 500, body: { error: evalError }, headers: { "Content-Type": "application/json" } });
     }
 
     // Re-get memory view (may have grown)
@@ -313,11 +319,16 @@ class Homura
     if result
       handler, params = result
       ctx = Context.new(env, params)
-      handler.call(ctx)
+      response = handler.call(ctx)
+      # Include KV operations in response for JS to execute
+      response[:kv_ops] = ctx.kv_ops if ctx.kv_ops && !ctx.kv_ops.empty?
+      response
     else
       if @not_found
         ctx = Context.new(env, {})
-        @not_found.call(ctx)
+        response = @not_found.call(ctx)
+        response[:kv_ops] = ctx.kv_ops if ctx.kv_ops && !ctx.kv_ops.empty?
+        response
       else
         { status: 404, body: "Not Found", headers: {} }
       end
@@ -335,6 +346,7 @@ class Context
   def initialize(env, params)
     @env = env
     @params = params
+    @kv_ops = []
   end
 
   def body
@@ -346,6 +358,25 @@ class Context
     return {} if body_str.nil? || body_str.empty?
     # Return raw body string for now - parsing can be done in C
     body_str
+  end
+
+  # KV operations - read from pre-loaded data
+  def kv_get(key)
+    kv_data = @env[:kv_data] || {}
+    kv_data[key.to_s]
+  end
+
+  # KV operations - queue write for JS to execute
+  def kv_put(key, value)
+    @kv_ops << { op: "put", key: key.to_s, value: value.to_s }
+  end
+
+  def kv_delete(key)
+    @kv_ops << { op: "delete", key: key.to_s }
+  end
+
+  def kv_ops
+    @kv_ops
   end
 
   def json(data, status: 200)
@@ -658,9 +689,75 @@ end
 $app.get "/assets/app.css" do |c|
   c.css(APP_CSS)
 end
+
+# ===== KV Examples =====
+
+# Counter - increment and return count
+$app.get "/counter" do |c|
+  current = c.kv_get("counter")
+  count = current ? current.to_i : 0
+  new_count = count + 1
+  c.kv_put("counter", new_count.to_s)
+  c.json({ count: new_count, message: "Counter incremented!" })
+end
+
+# Counter reset
+$app.post "/counter/reset" do |c|
+  c.kv_put("counter", "0")
+  c.json({ count: 0, message: "Counter reset!" })
+end
+
+# User save - store user data by name (simple version without JSON parsing)
+$app.post "/kv/users/:name" do |c|
+  name = c.params[:name]
+  body_str = c.body
+  c.kv_put("user:" + name, body_str)
+  c.json({ saved: name, body: body_str }, status: 201)
+end
+
+# User get - retrieve user data by name
+$app.get "/kv/users/:name" do |c|
+  name = c.params[:name]
+  data = c.kv_get("user:" + name)
+  if data
+    c.json({ user: name, data: data })
+  else
+    c.json({ error: "User not found" }, status: 404)
+  end
+end
+
+# User delete
+$app.delete "/kv/users/:name" do |c|
+  name = c.params[:name]
+  c.kv_delete("user:" + name)
+  c.json({ deleted: name })
+end
 `;
 
-interface Env {}
+interface Env {
+  HOMURA_KV: KVNamespace;
+}
+
+// KV prefetch configuration - which keys to load for which route patterns
+const KV_PREFETCH_CONFIG: Record<string, string[]> = {
+  '/counter': ['counter'],
+};
+
+// Helper to get KV keys to prefetch based on path
+function getKvKeysForPath(path: string): string[] {
+  const keys: string[] = [];
+  for (const [pattern, prefetchKeys] of Object.entries(KV_PREFETCH_CONFIG)) {
+    if (path === pattern || path.startsWith(pattern + '/')) {
+      keys.push(...prefetchKeys);
+    }
+  }
+  // Prefetch user-specific keys (e.g., /kv/users/John → user:John)
+  const kvUserMatch = path.match(/^\/kv\/users\/([^/]+)$/);
+  if (kvUserMatch) {
+    keys.push(`user:${decodeURIComponent(kvUserMatch[1])}`);
+  }
+  return [...new Set(keys)];
+}
 
 let mruby: MRuby | null = null;
 let coreLoaded = false;
@@ -683,6 +780,24 @@ export default {
         coreLoaded = true;
       }
 
+      // Pre-fetch KV data for this request
+      const kvKeys = getKvKeysForPath(url.pathname);
+      const kvData: Record<string, string | null> = {};
+      if (env.HOMURA_KV && kvKeys.length > 0) {
+        await Promise.all(
+          kvKeys.map(async (key) => {
+            kvData[key] = await env.HOMURA_KV.get(key);
+          })
+        );
+      }
+
+      // Convert KV data to Ruby hash format
+      const kvDataEntries = Object.entries(kvData)
+        .filter(([_, v]) => v !== null)
+        .map(([k, v]) => `"${k}" => "${(v as string).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`)
+        .join(', ');
+      const kvDataRuby = `{ ${kvDataEntries} }`;
+
       // Read request body for POST/PUT/PATCH
       let bodyStr = '';
       if (['POST', 'PUT', 'PATCH'].includes(request.method)) {
@@ -696,11 +811,9 @@ export default {
         .replace(/\n/g, '\\n')
         .replace(/\r/g, '\\r');
 
-      // Call Ruby router using eval
-      // Note: Don't call to_json here - let C's value_to_json handle serialization
-      // to avoid double-encoding (Ruby to_json returns string, C wraps in quotes again)
+      // Call Ruby router using eval with KV data
       const envCode = `
-        env = { method: "${request.method}", path: "${url.pathname}", body: "${escapedBody}" }
+        env = { method: "${request.method}", path: "${url.pathname}", body: "${escapedBody}", kv_data: ${kvDataRuby} }
         $app.call(env)
       `;
 
@@ -708,7 +821,7 @@ export default {
       console.log('[homura fetch] resultJson:', resultJson);
 
     // Parse result
-    let result: { status: number; body: string; headers: Record<string, string> };
+    let result: { status: number; body: string; headers: Record<string, string>; kv_ops?: Array<{ op: string; key: string; value?: string }> };
       try {
         result = JSON.parse(resultJson);
         console.log('[homura fetch] parsed result:', JSON.stringify(result));
@@ -717,6 +830,27 @@ export default {
         return new Response(
           JSON.stringify({ error: 'Parse error', raw: resultJson }),
           { status: 500, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Process KV operations in the background
+      if (result.kv_ops && result.kv_ops.length > 0 && env.HOMURA_KV) {
+        ctx.waitUntil(
+          (async () => {
+            for (const op of result.kv_ops!) {
+              try {
+                if (op.op === 'put' && op.value !== undefined) {
+                  await env.HOMURA_KV.put(op.key, op.value);
+                  console.log('[homura kv] put:', op.key, '=', op.value);
+                } else if (op.op === 'delete') {
+                  await env.HOMURA_KV.delete(op.key);
+                  console.log('[homura kv] delete:', op.key);
+                }
+              } catch (e) {
+                console.error('[homura kv] error:', op, e);
+              }
+            }
+          })()
         );
       }
 
