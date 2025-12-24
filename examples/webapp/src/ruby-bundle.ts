@@ -350,19 +350,7 @@ CSS
 
 \$app.get "/" do |c|
   current_count = c.kv_get("counter") || "0"
-  c.jsx("home", {
-    eyebrow: "mruby + WASI",
-    headline: "Homuraで軽量Webサーバー",
-    lead: "APIだけでなく静的ページも素早く返す、Hono風のRuby DSLです。",
-    template_note: "JSXテンプレで軽量にHTMLを組み立て。",
-    web_note: "CSSやHTMLを同梱して小さなWebに最適。",
-    hono_note: "get/post + Context APIでHono互換の使い心地。",
-    counter: current_count
-  })
-end
-
-\$app.get "/about" do |c|
-  c.jsx("about", { framework: "mruby + WASI", template_style: "JSX" })
+  c.jsx("home", { counter: current_count })
 end
 
 \$app.get "/hello/:name" do |c|

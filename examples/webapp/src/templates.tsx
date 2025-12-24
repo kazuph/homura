@@ -31,71 +31,112 @@ const Layout = ({
             Homura
           </a>
           <nav className="nav">
-            <a href="/about">About</a>
             <a href="/api">API</a>
-            <a href="/hello/edge">Hello</a>
+            <a href="https://github.com/kazuph/homura-claude" target="_blank">GitHub</a>
           </nav>
         </div>
       </header>
       <main className="container">{children}</main>
       <footer className="site-footer">
-        <div className="container">Homura / mruby + WASI</div>
+        <div className="container">Homura - Ruby DSL for Cloudflare Workers</div>
       </footer>
     </body>
   </html>
 );
 
-const Home = ({
-  eyebrow,
-  headline,
-  lead,
-  template_note,
-  web_note,
-  hono_note,
-  counter,
-}: TemplateLocals) => (
+const Home = ({ counter }: TemplateLocals) => (
   <>
     <section className="hero">
-      <p className="eyebrow">{eyebrow}</p>
-      <h1>{headline}</h1>
-      <p className="lead">{lead}</p>
+      <p className="eyebrow">mruby + WASI on Cloudflare Workers</p>
+      <h1>Homura</h1>
+      <p className="lead">
+        RubyでCloudflare Workersアプリを書くためのDSLフレームワーク。
+        このページ自体がHomuraで動いています。
+      </p>
       <div className="actions">
-        <a className="button" href="/about">
-          About
+        <a className="button" href="/api">
+          API Demo
         </a>
-        <a className="button ghost" href="/api">
-          API JSON
+        <a className="button ghost" href="https://github.com/kazuph/homura-claude" target="_blank">
+          GitHub
         </a>
-      </div>
-    </section>
-
-    <section className="counter-section">
-      <div className="counter-card">
-        <h2>KV カウンター</h2>
-        <p className="counter-desc">Cloudflare KV を使った永続カウンター</p>
-        <div className="counter-display">
-          <span id="counter-value">{counter || '0'}</span>
-        </div>
-        <div className="counter-actions">
-          <button id="btn-increment" className="button">+1 カウント</button>
-          <button id="btn-reset" className="button ghost">リセット</button>
-        </div>
-        <p id="counter-status" className="counter-status"></p>
       </div>
     </section>
 
     <section className="grid">
       <div className="card">
-        <h3>テンプレート</h3>
-        <p>{template_note}</p>
+        <h3>Ruby DSL</h3>
+        <p>Hono風のシンプルなルーティングAPI。get/postとContext APIで直感的にルートを定義。</p>
       </div>
       <div className="card">
-        <h3>軽量Web</h3>
-        <p>{web_note}</p>
+        <h3>mruby + WASI</h3>
+        <p>mrubyをWebAssemblyにコンパイル。エッジでRubyコードが実行される。</p>
       </div>
       <div className="card">
-        <h3>Hono互換</h3>
-        <p>{hono_note}</p>
+        <h3>JSXテンプレート</h3>
+        <p>TypeScript/JSXでHTMLテンプレートを構築。型安全なビュー層。</p>
+      </div>
+      <div className="card">
+        <h3>KVバインディング</h3>
+        <p>Cloudflare KVと連携。Rubyから直接データを読み書き。</p>
+      </div>
+    </section>
+
+    <section className="stack">
+      <h2>アーキテクチャ</h2>
+      <div className="card">
+        <pre style={{ fontSize: '14px', overflow: 'auto', margin: 0, lineHeight: 1.5 }}>{`
+┌─────────────────────────────────────────────────────┐
+│  Cloudflare Workers                                 │
+│  ┌───────────────────────────────────────────────┐  │
+│  │  TypeScript (index.ts)                        │  │
+│  │  - リクエスト受信                              │  │
+│  │  - mruby WASM 初期化                          │  │
+│  │  - KV prefetch / post-process                 │  │
+│  │  - JSX → HTML レンダリング                    │  │
+│  └───────────────┬───────────────────────────────┘  │
+│                  │ eval()                           │
+│  ┌───────────────▼───────────────────────────────┐  │
+│  │  mruby (lib/homura.rb + app/routes.rb)        │  │
+│  │  - $app.get/post でルート定義                 │  │
+│  │  - c.json / c.html / c.jsx でレスポンス       │  │
+│  │  - c.kv_get / c.kv_put でKV操作               │  │
+│  └───────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────┘
+        `}</pre>
+      </div>
+    </section>
+
+    <section className="stack">
+      <h2>ルート定義例</h2>
+      <div className="card">
+        <pre style={{ fontSize: '14px', overflow: 'auto', margin: 0 }}>{`# app/routes.rb
+$app.get "/" do |c|
+  c.jsx("home", { title: "Welcome" })
+end
+
+$app.get "/api" do |c|
+  c.json({ message: "Hello!", version: "0.1.0" })
+end
+
+$app.get "/hello/:name" do |c|
+  c.html("<h1>Hello, \#{c.params[:name]}!</h1>")
+end`}</pre>
+      </div>
+    </section>
+
+    <section className="counter-section">
+      <div className="counter-card">
+        <h2>KV Demo</h2>
+        <p className="counter-desc">Cloudflare KV を使った永続カウンター</p>
+        <div className="counter-display">
+          <span id="counter-value">{counter || '0'}</span>
+        </div>
+        <div className="counter-actions">
+          <button id="btn-increment" className="button">+1</button>
+          <button id="btn-reset" className="button ghost">Reset</button>
+        </div>
+        <p id="counter-status" className="counter-status"></p>
       </div>
     </section>
 
@@ -103,63 +144,30 @@ const Home = ({
       (function() {
         const counterEl = document.getElementById('counter-value');
         const statusEl = document.getElementById('counter-status');
-        const btnIncrement = document.getElementById('btn-increment');
-        const btnReset = document.getElementById('btn-reset');
-
-        async function increment() {
+        document.getElementById('btn-increment').addEventListener('click', async () => {
           statusEl.textContent = '...';
-          try {
-            const res = await fetch('/counter');
-            const data = await res.json();
-            counterEl.textContent = data.count;
-            statusEl.textContent = data.message;
-          } catch (e) {
-            statusEl.textContent = 'エラー: ' + e.message;
-          }
-        }
-
-        async function reset() {
+          const res = await fetch('/counter');
+          const data = await res.json();
+          counterEl.textContent = data.count;
+          statusEl.textContent = data.message;
+        });
+        document.getElementById('btn-reset').addEventListener('click', async () => {
           statusEl.textContent = '...';
-          try {
-            const res = await fetch('/counter/reset', { method: 'POST' });
-            const data = await res.json();
-            counterEl.textContent = data.count;
-            statusEl.textContent = data.message;
-          } catch (e) {
-            statusEl.textContent = 'エラー: ' + e.message;
-          }
-        }
-
-        btnIncrement.addEventListener('click', increment);
-        btnReset.addEventListener('click', reset);
+          const res = await fetch('/counter/reset', { method: 'POST' });
+          const data = await res.json();
+          counterEl.textContent = data.count;
+          statusEl.textContent = data.message;
+        });
       })();
     ` }} />
   </>
 );
 
-const About = ({ framework, template_style }: TemplateLocals) => (
-  <section className="stack">
-    <h1>Homuraについて</h1>
-    <p>このテンプレは{framework}で動く軽量Webサーバーとして設計しています。</p>
-    <ul className="list">
-      <li>Hono風のルーティングとContext API</li>
-      <li>テンプレは{template_style}方式</li>
-      <li>必要最低限のランタイム（外部gem無し）</li>
-    </ul>
-  </section>
-);
-
 const templates: Record<string, (locals: TemplateLocals) => string> = {
   home: (locals) =>
     renderToString(
-      <Layout title="Homura - Home">
+      <Layout title="Homura - Ruby DSL for Cloudflare Workers">
         <Home {...locals} />
-      </Layout>
-    ),
-  about: (locals) =>
-    renderToString(
-      <Layout title="Homura - About">
-        <About {...locals} />
       </Layout>
     ),
 };
