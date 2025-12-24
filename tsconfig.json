@@ -4,7 +4,7 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
-    "jsxImportSource": "./jsx",
+    "jsxImportSource": "./lib/jsx",
     "strict": true,
     "skipLibCheck": true
   }
