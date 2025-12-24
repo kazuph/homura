@@ -4,18 +4,9 @@
   "description": "A Ruby DSL web framework for Cloudflare Workers powered by mruby + WASI",
   "type": "module",
   "scripts": {
-    "bundle:ruby": "node scripts/bundle-ruby.js",
-    "dev": "npm run bundle:ruby && wrangler dev",
-    "deploy": "npm run bundle:ruby && wrangler deploy",
     "build:mruby": "cd mruby && make",
-    "build": "npm run bundle:ruby && npm run build:mruby && wrangler deploy --dry-run"
-  },
-  "dependencies": {
-    "@msgpack/msgpack": "^3.1.2",
-    "hono": "^4.11.1"
-  },
-  "devDependencies": {
-    "wrangler": "^3.99.0"
+    "example:dev": "cd examples/webapp && npm run dev",
+    "example:deploy": "cd examples/webapp && npm run deploy"
   },
   "keywords": [
     "ruby",
