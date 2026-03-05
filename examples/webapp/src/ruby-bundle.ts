@@ -8,6 +8,12 @@ class Homura
   def initialize
     @routes = {}
     @not_found = nil
+    @middleware = []
+  end
+
+  # Middleware registration: use { |ctx, nxt| nxt.call }
+  def use(&block)
+    @middleware << block
   end
 
   def get(path, &block)
@@ -58,13 +64,13 @@ class Homura
     if result
       handler, params = result
       ctx = Context.new(env, params)
-      response = handler.call(ctx)
+      response = run_middleware(ctx) { handler.call(ctx) }
       response[:kv_ops] = ctx.kv_ops if ctx.kv_ops && !ctx.kv_ops.empty?
       response
     else
       if @not_found
         ctx = Context.new(env, {})
-        response = @not_found.call(ctx)
+        response = run_middleware(ctx) { @not_found.call(ctx) }
         response[:kv_ops] = ctx.kv_ops if ctx.kv_ops && !ctx.kv_ops.empty?
         response
       else
@@ -75,6 +81,22 @@ class Homura
 
   def not_found(&block)
     @not_found = block
+  end
+
+  private
+
+  def run_middleware(ctx, &final_handler)
+    chain = @middleware.dup
+    run_next = nil
+    run_next = lambda {
+      if chain.empty?
+        final_handler.call
+      else
+        mw = chain.shift
+        mw.call(ctx, run_next)
+      end
+    }
+    run_next.call
   end
 end
 
@@ -94,7 +116,7 @@ class Context
   def json_body
     body_str = body
     return {} if body_str.nil? || body_str.empty?
-    body_str
+    parse_json(body_str)
   end
 
   # KV operations
@@ -246,12 +268,25 @@ end
 export const USER_ROUTES = `# Homura Routes - Define your application routes here
 # This is the main file you'll edit to build your app
 
-# ===== Pages =====
-
-\$app.get "/" do |c|
-  current_count = c.kv_get("counter") || "0"
-  c.jsx("home", { counter: current_count })
+# ===== Middleware =====
+# Example: Content-Type validation for JSON APIs
+\$app.use do |ctx, nxt|
+  method = ctx.env[:method]
+  if (method == "POST" || method == "PUT" || method == "PATCH")
+    content_type = ctx.env[:content_type] || ""
+    if ctx.env[:path].start_with?("/api/") && !content_type.include?("application/json") && !ctx.body.empty?
+      ctx.json({ error: "Content-Type must be application/json" }, status: 415)
+    else
+      nxt.call
+    end
+  else
+    nxt.call
+  end
 end
+
+# ===== Pages =====
+# Note: "/" is handled directly in TypeScript (D1 + JSX)
+# Note: "/api/todos*" is handled directly in TypeScript (D1 CRUD)
 
 \$app.get "/hello/:name" do |c|
   safe_name = View.h(c.params[:name])

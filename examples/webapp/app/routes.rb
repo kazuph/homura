@@ -1,12 +1,25 @@
 # Homura Routes - Define your application routes here
 # This is the main file you'll edit to build your app
 
-# ===== Pages =====
-
-$app.get "/" do |c|
-  current_count = c.kv_get("counter") || "0"
-  c.jsx("home", { counter: current_count })
+# ===== Middleware =====
+# Example: Content-Type validation for JSON APIs
+$app.use do |ctx, nxt|
+  method = ctx.env[:method]
+  if (method == "POST" || method == "PUT" || method == "PATCH")
+    content_type = ctx.env[:content_type] || ""
+    if ctx.env[:path].start_with?("/api/") && !content_type.include?("application/json") && !ctx.body.empty?
+      ctx.json({ error: "Content-Type must be application/json" }, status: 415)
+    else
+      nxt.call
+    end
+  else
+    nxt.call
+  end
 end
+
+# ===== Pages =====
+# Note: "/" is handled directly in TypeScript (D1 + JSX)
+# Note: "/api/todos*" is handled directly in TypeScript (D1 CRUD)
 
 $app.get "/hello/:name" do |c|
   safe_name = View.h(c.params[:name])

@@ -21,58 +21,60 @@
 
 ### Done（完了）
 - 技術選定完了（mruby + WASI + Workers）
-- claude/ ディレクトリ作成
 - package.json, wrangler.toml 作成
-- Homura フレームワーク（JS版）実装
+- Homura フレームワーク実装
 - **Phase 2: mruby WASI ビルド完了 ✅**
   - wasi-sdk インストール (`~/.local/wasi-sdk`)
-  - mruby ソースのクローン・ビルド（905KB wasm）
+  - mruby ソースのクローン・ビルド（790KB wasm）
   - wasm-sjlj 対応（`__wasm_setjmp`, `__wasm_longjmp`, `__wasm_setjmp_test` を JS 実装）
   - JS から mruby.wasm を呼び出す統合
   - WASI imports 実装（fd_write, clock_time_get, random_get 等）
-- **Ruby DSL ルーティング動作確認 ✅**
-  - `GET /` → JSON レスポンス
-  - `GET /about` → テキストレスポンス
-  - `GET /users/:id` → パスパラメータ付き JSON
-  - `GET /hello/:name` → HTML レスポンス
-  - `GET /health` → ヘルスチェック JSON
-  - 404 ハンドリング
 - **Phase 3: JSX テンプレートシステム ✅**
-  - カスタム JSX ランタイム実装 (`src/jsx/jsx-runtime.ts`, `src/jsx/render.ts`)
+  - カスタム JSX ランタイム実装 (`src/lib/jsx-runtime.ts`, `src/lib/render.ts`)
   - Ruby `c.jsx("template", props)` → JS `renderTemplate()` 連携
-  - Home/About テンプレート + レイアウトシステム
-  - CSS エンドポイント (`/assets/app.css`)
+  - To-Do アプリテンプレート + レイアウトシステム
+  - CSS配信 (`/assets/app.css`)
+- **Phase 4: セキュリティ + D1 + 機能拡張 ✅**
+  - eval 注入をMessagePack経路に置換（Critical修正）
+  - エラーハンドリング正常化（500応答、coreLoaded制御）
+  - D1連携: To-Do CRUDアプリ（GET/POST/PUT/DELETE）
+  - ミドルウェアチェーン（`use`/`next`パターン）
+  - `json_body` を実際にJSONパースするよう修正
+  - Content-Typeバリデーションミドルウェア例
+  - ドキュメント整合（README/CONTINUITY更新）
 
 ### Now（現在）
-- **Phase 3 完了！** 🎉
-- 開発サーバー: `http://localhost:55126`
-- JSX テンプレートシステム動作中
+- **Phase 4 完了！** 🎉
+- To-Do アプリ（D1永続化）がローカルで動作中
+- 開発サーバー: `http://localhost:8787`
 
 ### Next（次）
-- Phase 4: 機能拡張（必要に応じて）
-  - POST/PUT/DELETE サポート
-  - ミドルウェアチェーン
-  - リクエストボディパース
-  - Cloudflare デプロイ
+- Phase 5: 本番デプロイ
+  - D1マイグレーション（リモート）
+  - Cloudflare Workers デプロイ
+  - E2E テスト・スクリーンショット検証
 
 ## Resolved questions（解決済み）
-- **mruby と JS 間の受け渡し**: 共有バッファ経由（input_buffer → eval → output_buffer）
+- **mruby と JS 間の受け渡し**: MessagePack経由（homura_handle_request）
+- **eval の用途**: フレームワークコア/ユーザールートのロードのみ（信頼されたコード）
 - **Ruby コード配置**: JS 内に埋め込み（HOMURA_CORE, USER_ROUTES 定数）
 - **setjmp/longjmp**: wasm-sjlj + JS ヘルパー関数で実装
+- **D1アクセス**: JS側で直接D1 APIを呼び出し（mrubyからはKV経由のみ）
 
 ## Open questions（未解決の質問）
 - Cloudflare Workers 本番デプロイ時のパフォーマンス
-- mruby.wasm のサイズ最適化（現在 905KB）
+- mruby.wasm のサイズ最適化（現在 790KB）
 
 ## Working set（作業セット）
-- /Users/kazuph/src/github.com/kazuph/homura-claude/
-  - src/index.ts (メインフレームワーク + Ruby DSL)
-  - src/templates.tsx (JSX テンプレート定義)
-  - src/jsx/
-    - jsx-runtime.ts (カスタム JSX ファクトリ)
-    - render.ts (renderToString 実装)
+- /Users/kazuph/src/github.com/kazuph/homura/
+  - examples/webapp/src/index.ts (Worker entry + D1 handler + mruby統合)
+  - examples/webapp/src/templates.tsx (JSX テンプレート: To-Doアプリ)
+  - examples/webapp/app/routes.rb (Rubyルート定義)
+  - examples/webapp/app/styles.css (アプリケーションCSS)
+  - examples/webapp/migrations/ (D1マイグレーション)
+  - lib/homura.rb (フレームワークコア: ルーティング、Context、ミドルウェア)
   - mruby/
     - Makefile (WASI ビルド)
     - build_config.rb (mruby クロスコンパイル設定)
-    - src/homura_entry.c (C API: init, eval, handle_request)
-    - build/mruby.wasm (出力)
+    - src/homura_entry.c (C API: init, eval, handle_request via MessagePack)
+    - build/mruby.wasm (出力 790KB)

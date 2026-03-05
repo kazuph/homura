@@ -5,6 +5,12 @@ class Homura
   def initialize
     @routes = {}
     @not_found = nil
+    @middleware = []
+  end
+
+  # Middleware registration: use { |ctx, nxt| nxt.call }
+  def use(&block)
+    @middleware << block
   end
 
   def get(path, &block)
@@ -55,13 +61,13 @@ class Homura
     if result
       handler, params = result
       ctx = Context.new(env, params)
-      response = handler.call(ctx)
+      response = run_middleware(ctx) { handler.call(ctx) }
       response[:kv_ops] = ctx.kv_ops if ctx.kv_ops && !ctx.kv_ops.empty?
       response
     else
       if @not_found
         ctx = Context.new(env, {})
-        response = @not_found.call(ctx)
+        response = run_middleware(ctx) { @not_found.call(ctx) }
         response[:kv_ops] = ctx.kv_ops if ctx.kv_ops && !ctx.kv_ops.empty?
         response
       else
@@ -72,6 +78,22 @@ class Homura
 
   def not_found(&block)
     @not_found = block
+  end
+
+  private
+
+  def run_middleware(ctx, &final_handler)
+    chain = @middleware.dup
+    run_next = nil
+    run_next = lambda {
+      if chain.empty?
+        final_handler.call
+      else
+        mw = chain.shift
+        mw.call(ctx, run_next)
+      end
+    }
+    run_next.call
   end
 end
 
@@ -91,7 +113,7 @@ class Context
   def json_body
     body_str = body
     return {} if body_str.nil? || body_str.empty?
-    body_str
+    parse_json(body_str)
   end
 
   # KV operations
