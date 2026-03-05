@@ -617,12 +617,23 @@ function validateRubyResponse(raw: unknown): RubyResponse {
             value: typeof op.value === 'string' ? op.value : undefined,
           };
         })
-      : undefined;
+        : undefined;
   const d1Ops = obj.d1_ops === undefined
     ? undefined
     : Array.isArray(obj.d1_ops)
       ? obj.d1_ops.map((op, idx) => validateD1Op(op, `response.d1_ops[${idx}]`))
-      : undefined;
+      : (() => {
+          throw new Error('Invalid response.d1_ops: expected array');
+        })();
+  if (obj.kv_ops !== undefined && !Array.isArray(obj.kv_ops)) {
+    throw new Error('Invalid response.kv_ops: expected array');
+  }
+  if (obj.d1_ops !== undefined && !Array.isArray(obj.d1_ops)) {
+    throw new Error('Invalid response.d1_ops: expected array');
+  }
+  if (obj.control !== undefined && !isPlainObject(obj.control)) {
+    throw new Error('Invalid response.control: expected object');
+  }
   const control = obj.control === undefined
     ? undefined
     : {
@@ -875,12 +886,24 @@ async function executeLoopOps(env: Env, result: RubyResponse): Promise<LoopOpRes
     throw new Error(`Too many operations in one loop: ${mergedOps.length}`);
   }
 
-  const kvOnly = mergedOps.filter((op): op is RubyLoopOp & KvOp => op.kind === 'kv');
-  const d1Only = mergedOps.filter((op): op is RubyLoopOp & D1Op => op.kind === 'd1');
-
-  const kvResults = await executeKvOps(env, kvOnly as KvOp[]);
-  const d1Results = await executeD1Ops(env, d1Only as D1Op[]);
-  return [...kvResults, ...d1Results];
+  const results: LoopOpResult[] = [];
+  for (const op of mergedOps) {
+    if (op.kind === 'kv') {
+      const kvResult = await executeKvOps(env, [op as KvOp]);
+      if (kvResult.length > 0) {
+        results.push(...kvResult);
+      }
+      continue;
+    }
+    if (op.kind === 'd1') {
+      const d1Result = await executeD1Ops(env, [op as D1Op]);
+      if (d1Result.length > 0) {
+        results.push(...d1Result);
+      }
+      continue;
+    }
+  }
+  return results;
 }
 
 // ─── Longjmp support for wasm-sjlj ────────────────────────────────
@@ -1272,6 +1295,7 @@ export default {
         );
 
         // continue loop のために操作は必ず実行。失敗時は全体500へ倒す。
+        const nextOps = loopOps.filter((op) => op.kind === 'd1');
         if (currentResult.control?.continue && loopOps.length === 0) {
           throw new Error('Continue requested but no operations returned');
         }
@@ -1283,7 +1307,7 @@ export default {
         if (!currentResult.control?.continue) {
           break;
         }
-        if (loopOps.length === 0) {
+        if (nextOps.length === 0) {
           throw new Error('Continue requested but no executable operations');
         }
         requestEnvelope = {
@@ -1291,7 +1315,7 @@ export default {
           control: {
             continue: true,
             // Ruby側再実行時に、実行結果を渡す
-            ops: loopOps,
+            ops: nextOps,
           },
         };
       }

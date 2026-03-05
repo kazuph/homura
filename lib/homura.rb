@@ -699,16 +699,26 @@ class Context
     results = fetch_env_value(@env, :control, {})
     ops = results.is_a?(Hash) ? (results[:ops] || results["ops"]) : nil
     list = ops.is_a?(Array) ? ops : []
-    next_result = list[@d1_cursor]
-    return D1_PENDING_RESULT unless next_result.is_a?(Hash)
-    ok = next_result["ok"] || next_result[:ok]
-    if ok == false || ok == "false"
-      raise RuntimeError, normalize_d1_error(next_result)
+
+    while @d1_cursor < list.length
+      next_result = list[@d1_cursor]
+      @d1_cursor += 1
+      next unless next_result.is_a?(Hash)
+
+      op = next_result["op"] || next_result[:op]
+      kind = next_result["kind"] || next_result[:kind]
+      next unless kind == "d1" || kind.nil? && ["all", "first", "get", "run", "exec", "batch", "transaction"].include?(op.to_s)
+
+      ok = next_result["ok"] || next_result[:ok]
+      if ok == false || ok == "false"
+        raise RuntimeError, normalize_d1_error(next_result)
+      end
+
+      payload = next_result["result"] || next_result[:result]
+      return normalize_d1_payload(expected_op, payload)
     end
 
-    @d1_cursor += 1
-    payload = next_result["result"] || next_result[:result]
-    normalize_d1_payload(expected_op, payload)
+    D1_PENDING_RESULT
   end
 
   def run_d1_op(op, sql, binds)
@@ -755,9 +765,9 @@ class Context
   end
 
   def normalize_d1_binds(raw_bind)
-    return [] unless raw_bind
+    return [] if raw_bind.nil?
     return raw_bind if raw_bind.is_a?(Array)
-    []
+    raise ArgumentError, "D1 bind parameters must be an array"
   end
 
   def normalize_d1_error(result)
@@ -827,9 +837,9 @@ class D1Client
   end
 
   def normalize_binds(raw)
-    return [] unless raw.nil?
+    return [] if raw.nil?
     return raw if raw.is_a?(Array)
-    []
+    raise ArgumentError, "D1 bind parameters must be an array"
   end
 
   def extract_meta_number(meta, key)
@@ -875,14 +885,30 @@ class Object
   end
 end
 
+HAS_JSON_PARSER = begin
+  require 'json'
+  true
+rescue LoadError
+  false
+end
+
 def parse_json(str)
   return {} if str.nil? || str.empty?
   str = str.strip
+
+  if HAS_JSON_PARSER
+    begin
+      return JSON.parse(str)
+    rescue => e
+      raise RuntimeError, "Invalid JSON: #{e.message}"
+    end
+  end
+
   return nil if str == "null"
   return true if str == "true"
   return false if str == "false"
 
-  if str.length > 0 && (str[0] == "-" || (str[0] >= "0" && str[0] <= "9"))
+  if str.match?(/\A-?\d+(\.\d+)?([eE][+-]?\d+)?\z/)
     return str.include?(".") ? str.to_f : str.to_i
   end
 
@@ -926,19 +952,47 @@ def parse_json(str)
         end
       end
 
-      if colon_idx
-        key_part = pair[0...colon_idx].strip
-        val_part = pair[(colon_idx+1)..-1].strip
-        if key_part.start_with?("\"") && key_part.end_with?("\"")
-          key = key_part[1..-2].to_sym
-          result[key] = parse_json(val_part)
-        end
+      raise RuntimeError, "Invalid JSON: malformed object" unless colon_idx
+      key_part = pair[0...colon_idx].strip
+      val_part = pair[(colon_idx+1)..-1].strip
+      if key_part.start_with?("\"") && key_part.end_with?("\"")
+        key = key_part[1..-2]
+        result[key] = parse_json(val_part)
+      else
+        raise RuntimeError, "Invalid JSON: invalid object key"
       end
     end
     return result
   end
 
-  str
+  if str.start_with?("[") && str.end_with?("]")
+    content = str[1..-2].strip
+    return [] if content.empty?
+
+    values = []
+    depth = 0
+    in_string = false
+    current = ""
+    content.each_char.with_index do |c, i|
+      if c == "\"" && (i == 0 || content[i - 1] != "\\")
+        in_string = !in_string
+      end
+      if !in_string && (c == "[" || c == "{")
+        depth += 1
+      elsif !in_string && (c == "]" || c == "}")
+        depth -= 1
+      elsif c == "," && depth == 0
+        values << parse_json(current.strip)
+        current = ""
+        next
+      end
+      current << c
+    end
+    values << parse_json(current.strip) unless current.empty?
+    return values
+  end
+
+  raise RuntimeError, "Invalid JSON"
 end
 
 $app = Homura.new
