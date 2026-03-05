@@ -10,7 +10,86 @@
 import mrubyWasm from '../../../mruby/build/mruby.wasm';
 import { renderTemplate } from './templates.tsx';
 import { HOMURA_CORE, USER_ROUTES } from './ruby-bundle';
-import { APP_CSS } from './styles-bundle';
+
+// Homura MessagePack v2 contract: request/response/control are
+// transported as a single typed envelope and all app routing is in Ruby.
+// D1 API方針: A継続実行ループ（Rubyがd1_opsを要求し続行し、TSが実行して再投入）
+const HOMURA_MSGPACK_VERSION = 2;
+const HOMURA_LOOP_STRATEGY = 'continue-loop';
+
+const MAX_MP_SIZE = 256 * 1024;
+const MAX_MP_ARRAY = 2000;
+const MAX_MP_MAP = 512;
+const MAX_HEADER_COUNT = 200;
+const MAX_LOOP_ITERATIONS = 16;
+const MAX_OPS_PER_LOOP = 64;
+const MAX_SQL_LENGTH = 5000;
+const MAX_SQL_BIND_COUNT = 64;
+
+interface RubyRequestEnvelope {
+  v: number;
+  request: {
+    // v2必須: method/path/body/content_type
+    method: string;
+    path: string;
+    // query は空オブジェクト可
+    query: Record<string, string>;
+    headers: Record<string, string>;
+    body: string;
+    content_type: string;
+    // 既存kvプリフェッチ（将来継続実行ループと共通化）
+    kv_data: Record<string, string>;
+  };
+  control?: {
+    // 継続実行ループ時のみ true
+    continue?: boolean;
+    // 次回再開時に実行するops
+    ops?: unknown[];
+  };
+}
+
+type KvOp = { op: 'put' | 'delete'; key: string; value?: string };
+type D1OpBase = { op: 'all' | 'first' | 'run' | 'exec' | 'get'; sql: string; binds?: unknown[] };
+type D1BatchOp = { op: 'all' | 'first' | 'run' | 'exec' | 'get'; sql: string; binds?: unknown[] };
+type D1BatchItem = { op: 'batch' | 'transaction'; statements: D1BatchOp[] };
+type D1Op = D1OpBase | D1BatchItem;
+type RubyLoopOp = (KvOp | D1Op) & { kind?: 'kv' | 'd1' };
+
+interface RubyResponse {
+  v: number;
+  // status は 100-599 の整数のみ許可
+  status: number;
+  // headers は map<string,string> のみ許可
+  headers: Record<string, string>;
+  // body は JSON互換型を許可
+  body: unknown;
+  type?: string;
+  template?: string;
+  props?: Record<string, unknown>;
+  kv_ops?: Array<{ op: string; key: string; value?: string }>;
+  d1_ops?: D1Op[];
+  control?: {
+    continue?: boolean;
+    ops?: unknown[];
+  };
+}
+
+interface LoopOpResult {
+  kind: 'kv' | 'd1';
+  op: string;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+  duration_ms?: number;
+}
+
+interface LoopExecutionSummary {
+  kind: 'kv' | 'd1';
+  status: 'ok' | 'error';
+  count: number;
+  duration_ms: number;
+  errors: string[];
+}
 
 // ─── MessagePack Encoder/Decoder ───────────────────────────────────
 
@@ -111,17 +190,30 @@ class MpDecoder {
     this.pos = 0;
   }
 
+  public getPos(): number {
+    return this.pos;
+  }
+
+  private ensure(n: number): void {
+    if (this.pos + n > this.data.length) {
+      throw new Error(`MessagePack decode truncated at ${this.pos}, need ${n} bytes`);
+    }
+  }
+
   private readU8(): number {
+    this.ensure(1);
     return this.data[this.pos++];
   }
 
   private readU16(): number {
+    this.ensure(2);
     const v = (this.data[this.pos] << 8) | this.data[this.pos + 1];
     this.pos += 2;
     return v;
   }
 
   private readU32(): number {
+    this.ensure(4);
     const v = (this.data[this.pos] << 24) | (this.data[this.pos + 1] << 16) |
               (this.data[this.pos + 2] << 8) | this.data[this.pos + 3];
     this.pos += 4;
@@ -129,6 +221,7 @@ class MpDecoder {
   }
 
   private readStr(len: number): string {
+    this.ensure(len);
     const bytes = this.data.slice(this.pos, this.pos + len);
     this.pos += len;
     return new TextDecoder().decode(bytes);
@@ -165,7 +258,15 @@ class MpDecoder {
       case 0xc4: return this.readStr(this.readU8());
       case 0xc5: return this.readStr(this.readU16());
       case 0xc6: return this.readStr(this.readU32());
+      case 0xca: {
+        this.ensure(4);
+        const buf = new ArrayBuffer(4);
+        const view = new Uint8Array(buf);
+        for (let i = 0; i < 4; i++) view[i] = this.data[this.pos++];
+        return new DataView(buf).getFloat32(0, false);
+      }
       case 0xcb: {
+        this.ensure(8);
         const buf = new ArrayBuffer(8);
         const view = new Uint8Array(buf);
         for (let i = 0; i < 8; i++) view[i] = this.data[this.pos++];
@@ -184,18 +285,38 @@ class MpDecoder {
         const val = hi * 0x100000000 + lo;
         return hi & 0x80000000 ? val - 0x10000000000000000 : val;
       }
-      case 0xdc: return this.decodeArray(this.readU16());
-      case 0xdd: return this.decodeArray(this.readU32());
-      case 0xde: return this.decodeMap(this.readU16());
-      case 0xdf: return this.decodeMap(this.readU32());
-      default: return null;
+      case 0xdc: {
+        const count = this.readU16();
+        if (count > MAX_MP_ARRAY) throw new Error(`MessagePack decode array too large: ${count}`);
+        return this.decodeArray(count);
+      }
+      case 0xdd: {
+        const count = this.readU32();
+        if (count > MAX_MP_ARRAY) throw new Error(`MessagePack decode array too large: ${count}`);
+        return this.decodeArray(count);
+      }
+      case 0xde: {
+        const count = this.readU16();
+        if (count > MAX_MP_MAP) throw new Error(`MessagePack decode map too large: ${count}`);
+        return this.decodeMap(count);
+      }
+      case 0xdf: {
+        const count = this.readU32();
+        if (count > MAX_MP_MAP) throw new Error(`MessagePack decode map too large: ${count}`);
+        return this.decodeMap(count);
+      }
+      default:
+        throw new Error(`Unknown MessagePack prefix: 0x${b.toString(16)}`);
     }
   }
 
   private decodeMap(count: number): Record<string, unknown> {
     const result: Record<string, unknown> = {};
     for (let i = 0; i < count; i++) {
-      const key = String(this.decode());
+      const key = this.decode();
+      if (typeof key !== 'string') {
+        throw new Error(`MessagePack decode map key is not string: ${typeof key}`);
+      }
       result[key] = this.decode();
     }
     return result;
@@ -212,40 +333,554 @@ class MpDecoder {
 
 function mpDecode(data: Uint8Array): unknown {
   try {
-    return new MpDecoder(data).decode();
+    if (data.length > MAX_MP_SIZE) {
+      throw new Error(`MessagePack payload exceeds maximum ${MAX_MP_SIZE} bytes`);
+    }
+    const decoder = new MpDecoder(data);
+    const value = decoder.decode();
+    if (decoder.getPos() !== data.length) {
+      throw new Error(`MessagePack trailing bytes: ${data.length - decoder.getPos()}`);
+    }
+    return value;
   } catch (e) {
     throw new Error(`MessagePack decode failed (${data.length} bytes): ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
-interface RubyResponse {
-  status: number;
-  headers: Record<string, string>;
-  body: unknown;
-  type?: string;
-  template?: string;
-  props?: Record<string, unknown>;
-  kv_ops?: Array<{ op: string; key: string; value?: string }>;
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function createRequestId(request: Request): string {
+  const xRequestId = request.headers.get('x-request-id');
+  if (xRequestId && xRequestId.trim()) {
+    return xRequestId;
+  }
+  if ('randomUUID' in crypto && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `homura-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function parseKvPrefetchKeys(path: string): string[] {
+  const keys = new Set<string>();
+
+  if (path === '/counter' || path === '/counter/reset') {
+    keys.add('counter');
+  }
+
+  const userMatch = path.match(/^\/kv\/users\/([^/?#]+)$/);
+  if (userMatch && userMatch[1]) {
+    try {
+      keys.add(`user:${decodeURIComponent(userMatch[1])}`);
+    } catch (e) {
+      keys.add(`user:${userMatch[1]}`);
+    }
+  }
+
+  return Array.from(keys);
+}
+
+async function prefetchKvData(env: Env, path: string): Promise<Record<string, string>> {
+  const kvData: Record<string, string> = {};
+  if (!env.HOMURA_KV) {
+    return kvData;
+  }
+
+  const keys = parseKvPrefetchKeys(path);
+  for (const key of keys) {
+    const value = await env.HOMURA_KV.get(key);
+    if (value !== null && value !== undefined) {
+      kvData[key] = value;
+    }
+  }
+  return kvData;
+}
+
+function summarizeLoopResults(results: LoopOpResult[]): LoopExecutionSummary[] {
+  const summary = new Map<string, LoopExecutionSummary>();
+  for (const result of results) {
+    const key = `${result.kind}:${result.op}`;
+    const current = summary.get(key) || {
+      kind: result.kind,
+      status: 'ok',
+      count: 0,
+      duration_ms: 0,
+      errors: [],
+    };
+
+    current.count += 1;
+    current.duration_ms += result.duration_ms || 0;
+    if (!result.ok) {
+      current.status = 'error';
+      current.errors.push(result.error || 'unknown error');
+    }
+    summary.set(key, current);
+  }
+  return Array.from(summary.values());
+}
+
+function validateStringRecord(value: unknown, label: string): Record<string, string> {
+  if (!isPlainObject(value)) {
+    throw new Error(`Invalid ${label}: expected object`);
+  }
+  const out: Record<string, string> = {};
+  let count = 0;
+  for (const [key, v] of Object.entries(value)) {
+    count++;
+    if (count > MAX_HEADER_COUNT) {
+      throw new Error(`Invalid ${label}: too many entries`);
+    }
+    if (typeof key !== 'string') {
+      throw new Error(`Invalid ${label} key: ${String(key)}`);
+    }
+    if (typeof v !== 'string') {
+      throw new Error(`Invalid ${label} value for "${key}": expected string`);
+    }
+    out[key] = v;
+  }
+  return out;
+}
+
+function validateResponseBody(value: unknown, path: string): unknown {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item, index) => validateResponseBody(item, `${path}[${index}]`));
+  }
+  if (isPlainObject(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (typeof key !== 'string') {
+        throw new Error(`Invalid response body key at ${path}: ${String(key)}`);
+      }
+      out[key] = validateResponseBody(item, `${path}.${key}`);
+    }
+    return out;
+  }
+  throw new Error(`Invalid response body at ${path}: ${typeof value}`);
+}
+
+function validateBindings(raw: unknown, path: string): unknown[] {
+  if (!Array.isArray(raw)) {
+    throw new Error(`Invalid ${path}: expected array`);
+  }
+  if (raw.length > MAX_SQL_BIND_COUNT) {
+    throw new Error(`Invalid ${path}: bind count too large`);
+  }
+  return raw;
+}
+
+function validateKvOp(raw: unknown, path: string): KvOp {
+  if (!isPlainObject(raw)) {
+    throw new Error(`Invalid ${path}: expected object`);
+  }
+  const op = typeof raw.op === 'string' ? raw.op : undefined;
+  const key = typeof raw.key === 'string' ? raw.key : undefined;
+  const value = raw.value;
+  if (op !== 'put' && op !== 'delete') {
+    throw new Error(`Invalid ${path}.op: ${String(op)}`);
+  }
+  if (!key) {
+    throw new Error(`Invalid ${path}.key`);
+  }
+  if (value !== undefined && typeof value !== 'string') {
+    throw new Error(`Invalid ${path}.value`);
+  }
+  return { op, key, value: typeof value === 'string' ? value : undefined };
+}
+
+function validateD1Op(raw: unknown, path: string): D1Op {
+  if (!isPlainObject(raw)) {
+    throw new Error(`Invalid ${path}: expected object`);
+  }
+  const op = typeof raw.op === 'string' ? raw.op : undefined;
+  if (!op || !['all', 'first', 'get', 'run', 'exec', 'batch', 'transaction'].includes(op)) {
+    throw new Error(`Invalid ${path}.op: ${String(op)}`);
+  }
+
+  if (op === 'batch' || op === 'transaction') {
+    const statements = Array.isArray((raw as Record<string, unknown>).statements)
+      ? (raw as Record<string, unknown>).statements
+      : undefined;
+    if (!Array.isArray(statements)) {
+      throw new Error(`Invalid ${path}.statements: expected array`);
+    }
+    if (statements.length > MAX_OPS_PER_LOOP) {
+      throw new Error(`Invalid ${path}.statements: too many statements`);
+    }
+    const normalizedStatements = statements.map((stmt, idx) => {
+      const normalized = validateD1Op(stmt, `${path}.statements[${idx}]`);
+      if (!normalized || normalized.op === 'batch' || normalized.op === 'transaction') {
+        throw new Error(`Invalid ${path}.statements[${idx}].op`);
+      }
+      return normalized;
+    });
+    return { op, statements: normalizedStatements };
+  }
+
+  const sql = typeof raw.sql === 'string' ? raw.sql : undefined;
+  if (!sql) {
+    throw new Error(`Invalid ${path}.sql`);
+  }
+  if (sql.length > MAX_SQL_LENGTH) {
+    throw new Error(`Invalid ${path}.sql: too long`);
+  }
+  const binds = raw.binds === undefined ? [] : validateBindings(raw.binds, `${path}.binds`);
+  return { op, sql, binds };
+}
+
+function normalizeResponseControl(raw: unknown): RubyRequestEnvelope['control'] {
+  if (raw === undefined) return { continue: false, ops: [] };
+  if (!isPlainObject(raw)) {
+    throw new Error('Invalid response.control: expected object');
+  }
+  const continueValue = raw.continue;
+  if (continueValue !== undefined && typeof continueValue !== 'boolean') {
+    throw new Error('Invalid response.control.continue: expected boolean');
+  }
+  const continueRequested = continueValue === true;
+  const continueOps = raw.ops === undefined ? [] : raw.ops;
+  if (!Array.isArray(continueOps)) {
+    throw new Error('Invalid response.control.ops: expected array');
+  }
+  if ((raw as Record<string, unknown>).ops !== undefined && !Array.isArray(raw.ops)) {
+    throw new Error('Invalid response.control.ops: expected array');
+  }
+  if (continueOps.length > MAX_OPS_PER_LOOP) {
+    throw new Error(`Too many control operations: ${continueOps.length}`);
+  }
+  return { continue: continueRequested, ops: continueOps };
 }
 
 function validateRubyResponse(raw: unknown): RubyResponse {
-  if (typeof raw !== 'object' || raw === null) {
+  if (!isPlainObject(raw)) {
     throw new Error(`Invalid Ruby response: expected object, got ${typeof raw}`);
   }
   const obj = raw as Record<string, unknown>;
-  const status = typeof obj.status === 'number' ? obj.status : 200;
-  const headers = (typeof obj.headers === 'object' && obj.headers !== null)
-    ? obj.headers as Record<string, string>
-    : {};
+  if (obj.v !== HOMURA_MSGPACK_VERSION) {
+    throw new Error(`Invalid Ruby response version: expected ${HOMURA_MSGPACK_VERSION}, got ${String(obj.v)}`);
+  }
+  if (typeof obj.status !== 'number' || !Number.isInteger(obj.status) || obj.status < 100 || obj.status > 599) {
+    throw new Error(`Invalid Ruby response status: ${String(obj.status)}`);
+  }
+  const allowedTopLevel = new Set([
+    'v',
+    'status',
+    'headers',
+    'body',
+    'type',
+    'template',
+    'props',
+    'kv_ops',
+    'd1_ops',
+    'control',
+  ]);
+  for (const key of Object.keys(obj)) {
+    if (!allowedTopLevel.has(key)) {
+      throw new Error(`Invalid Ruby response key: ${key}`);
+    }
+  }
+  const headers = validateStringRecord(obj.headers, 'response.headers');
+  const body = 'body' in obj ? validateResponseBody(obj.body, 'response.body') : '';
+  const type = obj.type === undefined ? undefined : (typeof obj.type === 'string'
+    ? obj.type
+    : (() => { throw new Error('Invalid response.type: expected string'); })());
+  const template = obj.template === undefined ? undefined : (typeof obj.template === 'string'
+    ? obj.template
+    : (() => { throw new Error('Invalid response.template: expected string'); })());
+  const props = obj.props === undefined ? undefined : (isPlainObject(obj.props)
+    ? obj.props as Record<string, unknown>
+    : (() => { throw new Error('Invalid response.props: expected object'); })());
+  const kvOps = obj.kv_ops === undefined
+    ? undefined
+    : Array.isArray(obj.kv_ops)
+      ? obj.kv_ops.map((op, idx) => {
+          if (!isPlainObject(op)) {
+            throw new Error(`Invalid kv_op[${idx}]`);
+          }
+          if (typeof op.op !== 'string' || typeof op.key !== 'string') {
+            throw new Error(`Invalid kv_op[${idx}]`);
+          }
+          if (op.value !== undefined && typeof op.value !== 'string') {
+            throw new Error(`Invalid kv_op[${idx}].value`);
+          }
+          return {
+            op: op.op,
+            key: op.key,
+            value: typeof op.value === 'string' ? op.value : undefined,
+          };
+        })
+      : undefined;
+  const d1Ops = obj.d1_ops === undefined
+    ? undefined
+    : Array.isArray(obj.d1_ops)
+      ? obj.d1_ops.map((op, idx) => validateD1Op(op, `response.d1_ops[${idx}]`))
+      : undefined;
+  const control = obj.control === undefined
+    ? undefined
+    : {
+        continue: normalizeResponseControl(obj.control).continue,
+        ops: normalizeResponseControl(obj.control).ops,
+      };
+
   return {
-    status,
+    v: HOMURA_MSGPACK_VERSION,
+    status: obj.status,
     headers,
-    body: obj.body,
-    type: typeof obj.type === 'string' ? obj.type : undefined,
-    template: typeof obj.template === 'string' ? obj.template : undefined,
-    props: (typeof obj.props === 'object' && obj.props !== null) ? obj.props as Record<string, unknown> : undefined,
-    kv_ops: Array.isArray(obj.kv_ops) ? obj.kv_ops : undefined,
+    body,
+    type,
+    template,
+    props,
+    kv_ops: kvOps,
+    d1_ops: d1Ops,
+    control,
   };
+}
+
+function normalizeLoopOps(rawOps: unknown[]): RubyLoopOp[] {
+  const out: RubyLoopOp[] = [];
+  for (let i = 0; i < rawOps.length; i++) {
+    const raw = rawOps[i];
+    if (!isPlainObject(raw)) {
+      throw new Error(`Invalid control operation at index ${i}: expected object`);
+    }
+
+    const explicitKind = typeof raw.kind === 'string' ? raw.kind : undefined;
+    const rawOp = typeof raw.op === 'string' ? raw.op : undefined;
+    const opName = rawOp || '';
+
+    if (explicitKind === 'kv' || opName === 'put' || opName === 'delete') {
+      out.push({
+        kind: 'kv',
+        ...validateKvOp(raw, `control.ops[${i}]`),
+      });
+      continue;
+    }
+
+    if (explicitKind === 'd1') {
+      const d1Op = validateD1Op(raw, `control.ops[${i}]`);
+      out.push({ kind: 'd1', ...d1Op });
+      continue;
+    }
+
+    if (opName.startsWith('d1_')) {
+      const normalized = validateD1Op(
+        {
+          ...raw,
+          op: opName.replace(/^d1_/, ''),
+          sql: raw.sql,
+          binds: raw.binds,
+        },
+        `control.ops[${i}]`,
+      );
+      out.push({ kind: 'd1', ...normalized });
+      continue;
+    }
+
+    throw new Error(`Invalid control.ops[${i}].kind/op: unsupported operation`);
+  }
+  return out;
+}
+
+async function executeKvOps(env: Env, ops: Array<KvOp | D1Op>): Promise<LoopOpResult[]> {
+  const out: LoopOpResult[] = [];
+  if (!ops || ops.length === 0) return out;
+  for (const rawOp of ops) {
+    const start = performance.now();
+    if (rawOp.op !== 'put' && rawOp.op !== 'delete') {
+      out.push({
+        kind: 'kv',
+        op: rawOp.op,
+        ok: false,
+        error: `Invalid kv op: ${rawOp.op}`,
+        duration_ms: Math.round((performance.now() - start) * 100) / 100,
+      });
+      continue;
+    }
+    if (!env.HOMURA_KV) {
+      throw new Error('HOMURA_KV binding missing for kv operation');
+    }
+    try {
+      if (rawOp.op === 'put') {
+        await env.HOMURA_KV.put(rawOp.key, rawOp.value ?? '');
+      } else if (rawOp.op === 'delete') {
+        await env.HOMURA_KV.delete(rawOp.key);
+      }
+      out.push({
+        kind: 'kv',
+        op: rawOp.op,
+        ok: true,
+        duration_ms: Math.round((performance.now() - start) * 100) / 100,
+      });
+    } catch (e) {
+      out.push({
+        kind: 'kv',
+        op: rawOp.op,
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        duration_ms: Math.round((performance.now() - start) * 100) / 100,
+      });
+    }
+  }
+  return out;
+}
+
+async function executeD1Ops(env: Env, ops: D1Op[]): Promise<LoopOpResult[]> {
+  const out: LoopOpResult[] = [];
+  if (!ops || ops.length === 0) return out;
+  if (!env.HOMURA_DB) {
+    throw new Error('HOMURA_DB binding missing for D1 operation');
+  }
+
+  const normalizeRunResult = (result: unknown): { [key: string]: unknown } | null => {
+    if (!result || typeof result !== 'object') {
+      return null;
+    }
+    const runResult = result as Record<string, unknown>;
+    const meta = isPlainObject(runResult.meta) ? (runResult.meta as Record<string, unknown>) : {};
+    const affectedRows = typeof meta.changes === 'number' ? meta.changes : undefined;
+    const lastRowId = typeof meta.last_row_id === 'number' ? meta.last_row_id : undefined;
+    return {
+      ...runResult,
+      affected_rows: affectedRows,
+      last_row_id: lastRowId,
+    };
+  };
+
+  const executeSingle = async (rawOp: D1Op): Promise<{ ok: boolean; result?: unknown; error?: string }> => {
+    if (rawOp.op !== 'batch' && rawOp.op !== 'transaction') {
+      if (typeof rawOp.sql !== 'string' || rawOp.sql.length > MAX_SQL_LENGTH) {
+        throw new Error('D1 SQL exceeds limit');
+      }
+      if (rawOp.binds && rawOp.binds.length > MAX_SQL_BIND_COUNT) {
+        throw new Error('D1 bind count exceeds limit');
+      }
+    }
+
+    try {
+      if (rawOp.op === 'batch' || rawOp.op === 'transaction') {
+        const statements = rawOp.statements || [];
+        if (rawOp.op === 'transaction') {
+          await env.HOMURA_DB.prepare('BEGIN').run();
+        }
+        const statementResults: Array<{ op: string; ok: boolean; result?: unknown; error?: string }> = [];
+        for (const stmt of statements) {
+          if (typeof stmt.sql !== 'string' || stmt.sql.length > MAX_SQL_LENGTH) {
+            throw new Error('D1 SQL exceeds limit');
+          }
+          if (stmt.binds && stmt.binds.length > MAX_SQL_BIND_COUNT) {
+            throw new Error('D1 bind count exceeds limit');
+          }
+
+          const statement = env.HOMURA_DB.prepare(stmt.sql).bind(...(stmt.binds ?? []));
+          if (stmt.op === 'all') {
+            const result = await statement.all();
+            statementResults.push({ op: stmt.op, ok: true, result });
+          } else if (stmt.op === 'first' || stmt.op === 'get') {
+            const result = await statement.first();
+            statementResults.push({ op: stmt.op, ok: true, result });
+          } else if (stmt.op === 'run') {
+            const result = await statement.run();
+            statementResults.push({ op: stmt.op, ok: true, result: normalizeRunResult(result) ?? result });
+          } else if (stmt.op === 'exec') {
+            const result = await env.HOMURA_DB.exec(stmt.sql);
+            statementResults.push({ op: stmt.op, ok: true, result });
+          } else {
+            throw new Error(`Unsupported D1 statement op: ${stmt.op}`);
+          }
+        }
+
+        if (rawOp.op === 'transaction') {
+          await env.HOMURA_DB.prepare('COMMIT').run();
+        }
+
+        return { ok: true, result: statementResults };
+      }
+
+      const statement = env.HOMURA_DB.prepare(rawOp.sql).bind(...(rawOp.binds ?? []));
+      if (rawOp.op === 'all') {
+        const result = await statement.all();
+        return { ok: true, result };
+      }
+      if (rawOp.op === 'get' || rawOp.op === 'first') {
+        const result = await statement.first();
+        return { ok: true, result };
+      }
+      if (rawOp.op === 'run') {
+        const result = await statement.run();
+        return { ok: true, result: normalizeRunResult(result) ?? result };
+      }
+      if (rawOp.op === 'exec') {
+        const result = await env.HOMURA_DB.exec(rawOp.sql);
+        return { ok: true, result };
+      }
+      return { ok: false, error: `Unsupported D1 op: ${rawOp.op}` };
+    } catch (e) {
+      if (rawOp.op === 'transaction') {
+        try { await env.HOMURA_DB.prepare('ROLLBACK').run(); } catch {}
+      }
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  };
+
+  for (const op of ops) {
+    const start = performance.now();
+    try {
+      const outcome = await executeSingle(op);
+      if (outcome.ok && op.op === 'run') {
+        if (outcome.result && typeof outcome.result === 'object' && outcome.result !== null) {
+          const runResult = outcome.result as Record<string, unknown>;
+          const meta = isPlainObject(runResult.meta) ? (runResult.meta as Record<string, unknown>) : {};
+          const affectedRows = typeof meta.changes === 'number' ? meta.changes : undefined;
+          const lastRowId = typeof meta.last_row_id === 'number' ? meta.last_row_id : undefined;
+          outcome.result = {
+            ...runResult,
+            affected_rows: affectedRows,
+            last_row_id: lastRowId,
+          };
+        }
+      }
+      out.push({ kind: 'd1', op: op.op, ...outcome, duration_ms: Math.round((performance.now() - start) * 100) / 100 });
+    } catch (e) {
+      out.push({
+        kind: 'd1',
+        op: op.op,
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        duration_ms: Math.round((performance.now() - start) * 100) / 100,
+      });
+    }
+  }
+  return out;
+}
+
+async function executeLoopOps(env: Env, result: RubyResponse): Promise<LoopOpResult[]> {
+  const kvOps: KvOp[] = (result.kv_ops ?? []).map((op) => ({ ...op, kind: 'kv' as const })) as KvOp[];
+  const d1Ops: D1Op[] = result.d1_ops ?? [];
+  const controlOps = result.control?.ops ? normalizeLoopOps(result.control.ops) : [];
+
+  const mergedOps = [
+    ...kvOps.map((op): RubyLoopOp => ({ kind: 'kv', ...op })),
+    ...d1Ops.map((op): RubyLoopOp => ({ kind: 'd1', ...op })),
+    ...controlOps,
+  ];
+  if (mergedOps.length > MAX_OPS_PER_LOOP) {
+    throw new Error(`Too many operations in one loop: ${mergedOps.length}`);
+  }
+
+  const kvOnly = mergedOps.filter((op): op is RubyLoopOp & KvOp => op.kind === 'kv');
+  const d1Only = mergedOps.filter((op): op is RubyLoopOp & D1Op => op.kind === 'd1');
+
+  const kvResults = await executeKvOps(env, kvOnly as KvOp[]);
+  const d1Results = await executeD1Ops(env, d1Only as D1Op[]);
+  return [...kvResults, ...d1Results];
 }
 
 // ─── Longjmp support for wasm-sjlj ────────────────────────────────
@@ -467,7 +1102,7 @@ class MRuby {
    * Handle a request via MessagePack serialization (safe from injection).
    * Sends env as MessagePack → homura_handle_request → returns decoded response.
    */
-  handleRequest(env: Record<string, unknown>): Record<string, unknown> {
+  handleRequest(env: RubyRequestEnvelope): RubyResponse {
     if (!this.instance) throw new Error('mruby not initialized');
 
     const exports = this.instance.exports as any;
@@ -477,8 +1112,13 @@ class MRuby {
     const bufferPtr = exports.homura_get_input_buffer();
     const bufferSize = exports.homura_get_buffer_size();
 
-    if (encoded.length > bufferSize) {
-      return { status: 413, body: 'Request too large', headers: { 'Content-Type': 'text/plain' } };
+    if (encoded.length > bufferSize || encoded.length > MAX_MP_SIZE) {
+      return {
+        v: HOMURA_MSGPACK_VERSION,
+        status: 413,
+        headers: { 'Content-Type': 'text/plain' },
+        body: 'Request too large',
+      };
     }
 
     new Uint8Array(memory.buffer).set(encoded, bufferPtr);
@@ -489,7 +1129,12 @@ class MRuby {
     } catch (e) {
       if (e instanceof WasmLongjmpException) {
         console.error('[homura] Ruby exception (longjmp) during request handling');
-        return { status: 500, body: 'Ruby exception occurred', headers: { 'Content-Type': 'text/plain' } };
+        return {
+          v: HOMURA_MSGPACK_VERSION,
+          status: 500,
+          headers: { 'Content-Type': 'text/plain' },
+          body: 'Ruby exception occurred',
+        };
       }
       throw e;
     }
@@ -498,12 +1143,17 @@ class MRuby {
     const outputLen = exports.homura_get_output_length();
 
     if (!success || outputLen <= 0) {
-      return { status: 500, body: 'Internal Server Error', headers: { 'Content-Type': 'text/plain' } };
+      return {
+        v: HOMURA_MSGPACK_VERSION,
+        status: 500,
+        headers: { 'Content-Type': 'text/plain' },
+        body: 'Internal Server Error',
+      };
     }
 
     const outputData = new Uint8Array(memory.buffer, outputPtr, outputLen);
-    const result = mpDecode(outputData) as Record<string, unknown>;
-    return result;
+    const result = mpDecode(outputData);
+    return validateRubyResponse(result);
   }
 
   close(): void {
@@ -522,157 +1172,25 @@ interface Env {
   HOMURA_DB?: D1Database;
 }
 
-// ─── D1 To-Do API Handler ─────────────────────────────────────────
-
-function requireJsonContentType(request: Request): Response | null {
-  const ct = request.headers.get('Content-Type') || '';
-  if (!ct.includes('application/json')) {
-    return new Response(JSON.stringify({ error: 'Content-Type must be application/json' }), {
-      status: 415, headers: { 'Content-Type': 'application/json' },
-    });
-  }
-  return null;
-}
-
-async function parseJsonBody(request: Request): Promise<Record<string, unknown> | Response> {
-  try {
-    return await request.json() as Record<string, unknown>;
-  } catch {
-    return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-      status: 400, headers: { 'Content-Type': 'application/json' },
-    });
-  }
-}
-
-async function handleTodoApi(request: Request, url: URL, env: Env): Promise<Response> {
-  const jsonHeaders = { 'Content-Type': 'application/json' };
-
-  if (!env.HOMURA_DB) {
-    return new Response(JSON.stringify({ error: 'D1 database not configured' }), {
-      status: 500, headers: jsonHeaders,
-    });
-  }
-
-  const db = env.HOMURA_DB;
-  const method = request.method;
-  const idMatch = url.pathname.match(/^\/api\/todos\/(\d+)$/);
-  const todoId = idMatch ? parseInt(idMatch[1], 10) : null;
-
-  // Fix 3: Content-Type validation for write methods
-  if (method === 'POST' || method === 'PUT') {
-    const ctError = requireJsonContentType(request);
-    if (ctError) return ctError;
-  }
-
-  try {
-    // GET /api/todos - List all todos
-    if (method === 'GET' && url.pathname === '/api/todos') {
-      const result = await db.prepare('SELECT * FROM todos ORDER BY created_at DESC').all();
-      return new Response(JSON.stringify(result.results), { headers: jsonHeaders });
-    }
-
-    // POST /api/todos - Create a todo
-    if (method === 'POST' && url.pathname === '/api/todos') {
-      // Fix 5: JSON parse failure → 400
-      const bodyOrError = await parseJsonBody(request);
-      if (bodyOrError instanceof Response) return bodyOrError;
-      const body = bodyOrError as { title?: string };
-      if (!body.title || typeof body.title !== 'string' || body.title.trim() === '') {
-        return new Response(JSON.stringify({ error: 'title is required' }), {
-          status: 400, headers: jsonHeaders,
-        });
-      }
-      const result = await db.prepare('INSERT INTO todos (title) VALUES (?)').bind(body.title.trim()).run();
-      const todo = await db.prepare('SELECT * FROM todos WHERE id = ?').bind(result.meta.last_row_id).first();
-      return new Response(JSON.stringify(todo), { status: 201, headers: jsonHeaders });
-    }
-
-    // PUT /api/todos/:id - Toggle completed
-    if (method === 'PUT' && todoId !== null) {
-      const existing = await db.prepare('SELECT * FROM todos WHERE id = ?').bind(todoId).first();
-      if (!existing) {
-        return new Response(JSON.stringify({ error: 'Todo not found' }), {
-          status: 404, headers: jsonHeaders,
-        });
-      }
-      // Fix 2: JSON parse failure → 400 (not silent catch)
-      const bodyOrError = await parseJsonBody(request);
-      if (bodyOrError instanceof Response) return bodyOrError;
-      const body = bodyOrError as { completed?: boolean; title?: string };
-      // Fix 6: title validation
-      if (body.title !== undefined) {
-        if (typeof body.title !== 'string' || body.title.trim() === '') {
-          return new Response(JSON.stringify({ error: 'title must be a non-empty string' }), {
-            status: 400, headers: jsonHeaders,
-          });
-        }
-      }
-      const newCompleted = body.completed !== undefined ? (body.completed ? 1 : 0) : (existing.completed ? 0 : 1);
-      const newTitle = body.title !== undefined ? body.title.trim() : existing.title;
-      await db.prepare('UPDATE todos SET completed = ?, title = ? WHERE id = ?').bind(newCompleted, newTitle, todoId).run();
-      const updated = await db.prepare('SELECT * FROM todos WHERE id = ?').bind(todoId).first();
-      return new Response(JSON.stringify(updated), { headers: jsonHeaders });
-    }
-
-    // DELETE /api/todos/:id - Delete a todo
-    if (method === 'DELETE' && todoId !== null) {
-      const existing = await db.prepare('SELECT * FROM todos WHERE id = ?').bind(todoId).first();
-      if (!existing) {
-        return new Response(JSON.stringify({ error: 'Todo not found' }), {
-          status: 404, headers: jsonHeaders,
-        });
-      }
-      await db.prepare('DELETE FROM todos WHERE id = ?').bind(todoId).run();
-      return new Response(JSON.stringify({ deleted: true, id: todoId }), { headers: jsonHeaders });
-    }
-
-    return new Response(JSON.stringify({ error: 'Not Found' }), { status: 404, headers: jsonHeaders });
-  } catch (e) {
-    console.error('[homura d1] error:', e);
-    // Fix 5: Don't expose internal error details in 5xx responses
-    return new Response(JSON.stringify({ error: 'Internal Server Error' }), {
-      status: 500, headers: jsonHeaders,
-    });
-  }
-}
-
 let mruby: MRuby | null = null;
 let coreLoaded = false;
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    const requestId = createRequestId(request);
+    const requestLogBase = {
+      event: 'homura_request_start',
+      request_id: requestId,
+      method: request.method,
+      path: url.pathname,
+      strategy: HOMURA_LOOP_STRATEGY,
+    };
 
-    // Serve static assets directly (CSS)
-    if (url.pathname === '/assets/app.css') {
-      return new Response(APP_CSS, {
-        headers: { 'Content-Type': 'text/css' },
-      });
-    }
-
-    // ─── D1 To-Do API (handled directly in JS) ───────────────────
-    if (url.pathname.startsWith('/api/todos')) {
-      return handleTodoApi(request, url, env);
-    }
-
-    // ─── Home page: To-Do app (D1 + JSX) ───────────────────────
-    if (url.pathname === '/' && request.method === 'GET') {
-      let todos: unknown[] = [];
-      if (env.HOMURA_DB) {
-        try {
-          const result = await env.HOMURA_DB.prepare('SELECT * FROM todos ORDER BY created_at DESC').all();
-          todos = result.results;
-        } catch (e) {
-          console.error('[homura d1] home page query error:', e);
-        }
-      }
-      const html = renderTemplate('home', { todos: JSON.stringify(todos) });
-      return new Response(html, {
-        headers: { 'Content-Type': 'text/html' },
-      });
-    }
+    console.info(JSON.stringify(requestLogBase));
 
     try {
+      const method = request.method;
       // Initialize mruby VM
       if (!mruby) {
         mruby = new MRuby();
@@ -698,81 +1216,127 @@ export default {
 
       // Read request body for write methods
       let bodyStr = '';
-      if (['POST', 'PUT', 'PATCH'].includes(request.method)) {
+      if (['POST', 'PUT', 'PATCH'].includes(method)) {
         bodyStr = await request.text();
       }
 
-      // Fix 7: Pre-fetch KV data for routes that need it
-      const kvData: Record<string, string> = {};
-      if (env.HOMURA_KV) {
-        // /counter needs "counter" key
-        if (url.pathname === '/counter') {
-          const val = await env.HOMURA_KV.get('counter');
-          if (val !== null) kvData['counter'] = val;
-        }
-        // /kv/users/:name needs "user:NAME" key
-        const kvUserMatch = url.pathname.match(/^\/kv\/users\/([^/]+)$/);
-        if (kvUserMatch && request.method === 'GET') {
-          const key = `user:${decodeURIComponent(kvUserMatch[1])}`;
-          const val = await env.HOMURA_KV.get(key);
-          if (val !== null) kvData[key] = val;
-        }
-      }
+      const kvData = await prefetchKvData(env, url.pathname);
 
       // Build env as structured data (NO string interpolation / eval)
-      const rubyEnv: Record<string, unknown> = {
-        method: request.method,
-        path: url.pathname,
-        body: bodyStr,
-        content_type: request.headers.get('Content-Type') || '',
-        kv_data: kvData,
+      const rubyEnv: RubyRequestEnvelope = {
+        v: HOMURA_MSGPACK_VERSION,
+        request: {
+          method,
+          path: url.pathname,
+          query: Object.fromEntries(url.searchParams.entries()),
+          headers: Object.fromEntries(request.headers.entries()),
+          body: bodyStr,
+          content_type: request.headers.get('Content-Type') || '',
+          kv_data: kvData,
+        },
+        control: { continue: false },
       };
 
-      // Handle request via MessagePack (safe from injection)
-      const rawResult = mruby.handleRequest(rubyEnv);
-      const result = validateRubyResponse(rawResult);
+      let loopCount = 0;
+      let currentResult: RubyResponse | null = null;
+      const rubyRequest = rubyEnv;
+      let requestEnvelope: RubyRequestEnvelope = { ...rubyRequest, control: { continue: false } };
+      let totalOperations = 0;
+      let totalLoopMs = 0;
+      const totalFailures: string[] = [];
 
-      const { status, headers } = result;
+      while (true) {
+        const rawResult = mruby.handleRequest(requestEnvelope);
+        currentResult = validateRubyResponse(rawResult);
+        const loopOps = await executeLoopOps(env, currentResult);
+        const summary = summarizeLoopResults(loopOps);
+        const loopMs = loopOps.reduce((acc, item) => acc + (item.duration_ms || 0), 0);
+        const requestErrors = summary.flatMap((entry) => entry.errors);
+        totalOperations += loopOps.length;
+        totalLoopMs += loopMs;
+        totalFailures.push(...requestErrors);
 
-      // Handle KV operations from Ruby side
-      const kvOps = result.kv_ops;
-      if (kvOps && kvOps.length > 0 && env.HOMURA_KV) {
-        ctx.waitUntil(
-          (async () => {
-            for (const op of kvOps) {
-              try {
-                if (op.op === 'put' && op.value !== undefined) {
-                  await env.HOMURA_KV.put(op.key, op.value);
-                } else if (op.op === 'delete') {
-                  await env.HOMURA_KV.delete(op.key);
-                }
-              } catch (e) {
-                console.error('[homura kv] error:', op, e);
-              }
-            }
-          })()
+        console.info(
+          JSON.stringify({
+            event: 'homura_loop_exec',
+            request_id: requestId,
+            loop: loopCount + 1,
+            d1_enabled: !!env.HOMURA_DB,
+            operation_count: loopOps.length,
+            d1_operation_count: summary.filter((entry) => entry.kind === 'd1').reduce((acc, entry) => acc + entry.count, 0),
+            d1_ms: summary.filter((entry) => entry.kind === 'd1').reduce((acc, entry) => acc + entry.duration_ms, 0),
+            kv_operation_count: summary.filter((entry) => entry.kind === 'kv').reduce((acc, entry) => acc + entry.count, 0),
+            loop_ms: loopMs,
+            failure_reasons: requestErrors,
+          })
         );
+
+        // continue loop のために操作は必ず実行。失敗時は全体500へ倒す。
+        if (currentResult.control?.continue && loopOps.length === 0) {
+          throw new Error('Continue requested but no operations returned');
+        }
+        if (loopCount >= MAX_LOOP_ITERATIONS) {
+          throw new Error('Maximum loop iterations exceeded');
+        }
+        loopCount++;
+
+        if (!currentResult.control?.continue) {
+          break;
+        }
+        if (loopOps.length === 0) {
+          throw new Error('Continue requested but no executable operations');
+        }
+        requestEnvelope = {
+          ...rubyRequest,
+          control: {
+            continue: true,
+            // Ruby側再実行時に、実行結果を渡す
+            ops: loopOps,
+          },
+        };
       }
+
+      if (!currentResult) {
+        throw new Error('No response from Ruby runtime');
+      }
+      const result = currentResult;
+      const { status, headers } = result;
+      let response: Response;
 
       // Handle JSX template rendering
       if (result.type === 'jsx') {
         const templateName = result.template as string;
         const props = (result.props as Record<string, unknown>) || {};
         const html = renderTemplate(templateName, props);
-        return new Response(html, {
+        response = new Response(html, {
           status,
           headers: { ...headers, 'Content-Type': 'text/html' },
         });
+      } else {
+        const responseBody = typeof result.body === 'object'
+          ? JSON.stringify(result.body)
+          : String(result.body ?? '');
+        response = new Response(responseBody, { status, headers });
       }
-
-      const responseBody = typeof result.body === 'object'
-        ? JSON.stringify(result.body)
-        : String(result.body ?? '');
-
-      return new Response(responseBody, { status, headers });
+      console.info(JSON.stringify({
+        event: 'homura_request_complete',
+        request_id: requestId,
+        path: url.pathname,
+        status,
+        loop_count: loopCount,
+        total_op_count: totalOperations,
+        total_loop_ms: totalLoopMs,
+        failure_reasons: totalFailures,
+      }));
+      return response;
 
     } catch (error) {
-      console.error('Homura error:', error);
+      console.error(JSON.stringify({
+        event: 'homura_request_error',
+        request_id: requestId,
+        path: url.pathname,
+        error: error instanceof Error ? error.message : String(error),
+      }));
       return new Response(
         JSON.stringify({
           error: 'Internal Server Error',

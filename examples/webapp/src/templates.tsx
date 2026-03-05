@@ -10,6 +10,13 @@ function normalizeLocals(locals: Record<string, unknown>): TemplateLocals {
   return normalized;
 }
 
+function safeJsonForScript(value: string): string {
+  return value
+    .replaceAll('\\', '\\\\')
+    .replaceAll('</', '<\\/')
+    .replaceAll('<', '\\u003c');
+}
+
 const Layout = ({
   title,
   children,
@@ -100,7 +107,11 @@ const Home = ({ todos }: TemplateLocals) => (
       </div>
     </section>
 
-    <script type="application/json" id="initial-todos" dangerouslySetInnerHTML={{ __html: (todos || '[]').replace(/</g, '\\u003c') }} />
+    <script
+      type="application/json"
+      id="initial-todos"
+      dangerouslySetInnerHTML={{ __html: safeJsonForScript(todos || '[]') }}
+    />
     <script dangerouslySetInnerHTML={{ __html: `
       (function() {
         let currentFilter = 'all';
@@ -122,7 +133,7 @@ const Home = ({ todos }: TemplateLocals) => (
             return '<li class="todo-item' + (t.completed ? ' completed' : '') + '" data-id="' + t.id + '">' +
               '<label class="todo-checkbox">' +
                 '<input type="checkbox"' + (t.completed ? ' checked' : '') + '>' +
-                '<span class="todo-text">' + escapeHtml(t.title) + '</span>' +
+                '<span class="todo-text">' + window.__safeTodoText(t.title) + '</span>' +
               '</label>' +
               '<button class="todo-delete" title="削除">&times;</button>' +
             '</li>';
@@ -132,15 +143,15 @@ const Home = ({ todos }: TemplateLocals) => (
           countEl.textContent = active + ' 件の未完了タスク';
         }
 
-        function escapeHtml(str) {
+        window.__safeTodoText = function(value) {
           var div = document.createElement('div');
-          div.textContent = str;
+          div.textContent = value == null ? '' : String(value);
           return div.innerHTML;
-        }
+        };
 
         document.getElementById('btn-add').addEventListener('click', addTodo);
         inputEl.addEventListener('keydown', function(e) {
-          if (e.key === 'Enter') addTodo();
+          if (e.key === 'Enter' && !e.isComposing) addTodo();
         });
 
         async function addTodo() {

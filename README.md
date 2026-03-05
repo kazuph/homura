@@ -102,6 +102,36 @@ npm install
 npm run dev   # Starts wrangler dev on port 8787
 ```
 
+### テスト
+
+```bash
+cd examples/webapp
+npm test  # Node test (.js)
+
+cd ../.. # repository root
+ruby -I. test/homura_core_test.rb
+```
+
+テスト項目は `test/homura_core_test.rb` と `examples/webapp/tests/integration-security-notes.md` を参照してください。
+
+### Ruby-first 開発フロー（必読）
+
+Homuraでは `/api/*` を含むアプリ挙動は原則すべて `examples/webapp/app/routes.rb` で定義します。  
+TypeScript 側 (`examples/webapp/src/index.ts`) は以下だけを担当します。
+
+- WASM初期化（mruby）
+- MessagePack で `RubyRequestEnvelope` / `RubyResponse` を受け渡す
+- ルート外処理（Cloudflareバインディング実行）
+  - `kv_ops` の実行
+  - `d1_ops` の実行
+  - 継続実行ループ制御
+
+Rubyのみで追加開発する場合は、基本的に以下だけ更新すれば済みます。
+
+1. `examples/webapp/app/routes.rb` へのルート追加/更新
+2. `examples/webapp/migrations/*.sql` の必要なDDL変更
+3. `examples/webapp/src/templates.tsx` の表示整備（任意）
+
 ### Deploying
 
 ```bash
@@ -155,6 +185,29 @@ homura/
 - [x] Middleware system (`use`/`next`)
 - [x] JSON body parsing (`json_body`)
 - [ ] Query string parsing
+
+## Rubyファースト運用ガイドライン
+
+- `/api/*` や `"/"` ルートは Ruby ルート定義のみで変更する
+- TS 側は API 仕様変更を直接持たず、リクエスト契約(`RubyRequestEnvelope`)の整合だけ管理する
+- ルーティング、バリデーション、レスポンス整形の基本原則は Ruby 側で実装する
+- D1/KV の追加処理（`db`/`kv_put`/`kv_delete`）も Ruby の抽象 API から呼び出す
+
+## Migration運用規約
+
+- `examples/webapp/migrations/*.sql` は本番とローカルで同内容を共有し、都度履歴を追跡する
+- ローカル適用:
+  - `cd examples/webapp`
+  - `npx wrangler d1 migrations apply homura-db --local`
+- リモート適用:
+  - `npx wrangler d1 migrations apply homura-db --remote`
+- CI/CDでは deploy 前に `wrangler d1 migrations list homura-db` で適用状態を確認する
+
+## Ruby移植版の受け入れ基準
+
+- `/api/*` の主要経路の実装責務が Ruby で完結していること（TS側ルーティング実装が残らない）
+- `d1_ops` / `kv_ops` は MessagePack 契約を通じてのみ実行され、外部副作用が Ruby ルートから見える形で管理されていること
+- 主要機能追加時、`app/routes.rb` の変更だけで要件を満たせること（`index.ts`の編集を最小化）
 - [ ] Session/cookie helpers
 - [ ] WebSocket support
 
