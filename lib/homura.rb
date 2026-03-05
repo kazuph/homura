@@ -948,6 +948,49 @@ class Object
   end
 end
 
+def json_number_string?(str)
+  return false if str.nil? || str.empty?
+
+  idx = 0
+  if str[0] == "-"
+    return false if str.length == 1
+    idx = 1
+  end
+
+  digits = 0
+  while idx < str.length && str[idx] >= "0" && str[idx] <= "9"
+    idx += 1
+    digits += 1
+  end
+  return false if digits == 0
+
+  if idx < str.length && str[idx] == "."
+    idx += 1
+    fraction_digits = 0
+    while idx < str.length && str[idx] >= "0" && str[idx] <= "9"
+      idx += 1
+      fraction_digits += 1
+    end
+    return false if fraction_digits == 0
+  end
+
+  if idx < str.length && (str[idx] == "e" || str[idx] == "E")
+    idx += 1
+    if idx < str.length && (str[idx] == "+" || str[idx] == "-")
+      idx += 1
+    end
+
+    exponent_digits = 0
+    while idx < str.length && str[idx] >= "0" && str[idx] <= "9"
+      idx += 1
+      exponent_digits += 1
+    end
+    return false if exponent_digits == 0
+  end
+
+  idx == str.length
+end
+
 def parse_json(str)
   return {} if str.nil? || str.empty?
   str = str.strip
@@ -967,8 +1010,8 @@ def parse_json(str)
   return true if str == "true"
   return false if str == "false"
 
-  if str.match?(/\A-?\d+(\.\d+)?([eE][+-]?\d+)?\z/)
-    return str.include?(".") ? str.to_f : str.to_i
+  if json_number_string?(str)
+    return (str.include?(".") || str.include?("e") || str.include?("E")) ? str.to_f : str.to_i
   end
 
   if str.start_with?("\"") && str.end_with?("\"")

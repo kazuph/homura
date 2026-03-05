@@ -1268,6 +1268,301 @@ interface Env {
   HOMURA_DB?: D1Database;
 }
 
+interface TodoRow {
+  id: number;
+  title: string;
+  completed: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+  completed_at: string | null;
+}
+
+const TODO_JSON_HEADERS = {
+  'Content-Type': 'application/json; charset=utf-8',
+};
+
+function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
+  const headers = new Headers(init.headers);
+  for (const [key, value] of Object.entries(TODO_JSON_HEADERS)) {
+    if (!headers.has(key)) {
+      headers.set(key, value);
+    }
+  }
+  return new Response(JSON.stringify(body), {
+    ...init,
+    headers,
+  });
+}
+
+function normalizeTodoRow(row: unknown): TodoRow | null {
+  if (!isPlainObject(row)) {
+    return null;
+  }
+
+  const rawId = row.id;
+  const numericId = typeof rawId === 'number' ? rawId : Number(rawId);
+  if (!Number.isInteger(numericId) || numericId <= 0) {
+    return null;
+  }
+
+  const rawCompleted = row.completed;
+  const completed =
+    rawCompleted === true ||
+    rawCompleted === 1 ||
+    rawCompleted === '1' ||
+    (typeof rawCompleted === 'string' && rawCompleted.toLowerCase() === 'true');
+
+  return {
+    id: numericId,
+    title: typeof row.title === 'string' ? row.title : String(row.title ?? ''),
+    completed,
+    created_at: typeof row.created_at === 'string' ? row.created_at : null,
+    updated_at: typeof row.updated_at === 'string' ? row.updated_at : null,
+    completed_at: typeof row.completed_at === 'string' ? row.completed_at : null,
+  };
+}
+
+function normalizeTodoRows(rows: unknown[]): TodoRow[] {
+  const normalized: TodoRow[] = [];
+  for (const row of rows) {
+    const nextRow = normalizeTodoRow(row);
+    if (nextRow) {
+      normalized.push(nextRow);
+    }
+  }
+  return normalized;
+}
+
+function parseTodoTitle(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized ? normalized : null;
+}
+
+function parseTodoCompleted(value: unknown): boolean | null {
+  if (value === true || value === 1 || value === '1') {
+    return true;
+  }
+  if (value === false || value === 0 || value === '0') {
+    return false;
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') {
+      return true;
+    }
+    if (normalized === 'false') {
+      return false;
+    }
+  }
+  return null;
+}
+
+function parseTodoId(pathname: string): number | null {
+  const match = pathname.match(/^\/api\/todos\/(\d+)$/);
+  if (!match) {
+    return null;
+  }
+  const id = Number(match[1]);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+function isTodoDetailPath(pathname: string): boolean {
+  return pathname.startsWith('/api/todos/');
+}
+
+function requireTodoJsonContentType(request: Request): Response | null {
+  const contentType = request.headers.get('Content-Type') || '';
+  if (!contentType.includes('application/json')) {
+    return jsonResponse({ error: 'Content-Type must be application/json' }, { status: 415 });
+  }
+  return null;
+}
+
+async function parseTodoJsonBody(request: Request): Promise<Record<string, unknown> | Response> {
+  try {
+    const parsed = await request.json();
+    if (!isPlainObject(parsed)) {
+      return jsonResponse({ error: 'JSON body must be an object' }, { status: 400 });
+    }
+    return parsed;
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON body' }, { status: 400 });
+  }
+}
+
+function getRunMetaNumber(result: unknown, key: 'changes' | 'last_row_id'): number | null {
+  if (!isPlainObject(result) || !isPlainObject(result.meta)) {
+    return null;
+  }
+  const value = result.meta[key];
+  return typeof value === 'number' ? value : null;
+}
+
+async function renderTodoHome(env: Env): Promise<Response> {
+  let todos: TodoRow[] = [];
+  if (env.HOMURA_DB) {
+    const result = await env.HOMURA_DB
+      .prepare('SELECT id, title, completed, created_at, updated_at, completed_at FROM todos ORDER BY id DESC')
+      .all();
+    todos = normalizeTodoRows(Array.isArray(result.results) ? result.results : []);
+  }
+
+  const html = renderTemplate('home', { todos: JSON.stringify(todos) });
+  return new Response(html, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+    },
+  });
+}
+
+async function handleTodoApi(request: Request, url: URL, env: Env): Promise<Response> {
+  if (!env.HOMURA_DB) {
+    return jsonResponse({ error: 'D1 database not configured' }, { status: 500 });
+  }
+
+  const db = env.HOMURA_DB;
+  const { method } = request;
+  const todoId = parseTodoId(url.pathname);
+
+  if (isTodoDetailPath(url.pathname) && todoId === null) {
+    return jsonResponse({ error: 'Invalid todo id' }, { status: 400 });
+  }
+
+  if (method === 'GET' && url.pathname === '/api/todos') {
+    const result = await db
+      .prepare('SELECT id, title, completed, created_at, updated_at, completed_at FROM todos ORDER BY id DESC')
+      .all();
+    return jsonResponse(normalizeTodoRows(Array.isArray(result.results) ? result.results : []));
+  }
+
+  if (method === 'GET' && todoId !== null) {
+    const row = await db
+      .prepare('SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?')
+      .bind(todoId)
+      .first();
+    const todo = normalizeTodoRow(row);
+    if (!todo) {
+      return jsonResponse({ error: 'Todo not found' }, { status: 404 });
+    }
+    return jsonResponse(todo);
+  }
+
+  if (method === 'POST' && url.pathname === '/api/todos') {
+    const contentTypeError = requireTodoJsonContentType(request);
+    if (contentTypeError) {
+      return contentTypeError;
+    }
+
+    const bodyOrError = await parseTodoJsonBody(request);
+    if (bodyOrError instanceof Response) {
+      return bodyOrError;
+    }
+
+    const title = parseTodoTitle(bodyOrError.title);
+    if (!title) {
+      return jsonResponse({ error: 'title is required' }, { status: 400 });
+    }
+
+    const insertResult = await db
+      .prepare("INSERT INTO todos (title, completed, created_at, updated_at) VALUES (?, 0, datetime('now'), datetime('now'))")
+      .bind(title)
+      .run();
+    const lastRowId = getRunMetaNumber(insertResult, 'last_row_id');
+    if (!lastRowId) {
+      return jsonResponse({ error: 'Failed to insert todo' }, { status: 500 });
+    }
+
+    const row = await db
+      .prepare('SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?')
+      .bind(lastRowId)
+      .first();
+    const todo = normalizeTodoRow(row);
+    if (!todo) {
+      return jsonResponse({ error: 'Failed to load created todo' }, { status: 500 });
+    }
+    return jsonResponse(todo, { status: 201 });
+  }
+
+  if (method === 'PUT' && todoId !== null) {
+    const contentTypeError = requireTodoJsonContentType(request);
+    if (contentTypeError) {
+      return contentTypeError;
+    }
+
+    const bodyOrError = await parseTodoJsonBody(request);
+    if (bodyOrError instanceof Response) {
+      return bodyOrError;
+    }
+
+    const titleProvided = Object.prototype.hasOwnProperty.call(bodyOrError, 'title');
+    const completedProvided = Object.prototype.hasOwnProperty.call(bodyOrError, 'completed');
+
+    const title = titleProvided ? parseTodoTitle(bodyOrError.title) : null;
+    if (titleProvided && !title) {
+      return jsonResponse({ error: 'title must be a non-empty string' }, { status: 400 });
+    }
+
+    const completed = completedProvided ? parseTodoCompleted(bodyOrError.completed) : null;
+    if (completedProvided && completed === null) {
+      return jsonResponse({ error: 'completed must be a boolean' }, { status: 400 });
+    }
+
+    if (!titleProvided && !completedProvided) {
+      return jsonResponse({ error: 'title or completed is required' }, { status: 400 });
+    }
+
+    const updates: string[] = [];
+    const binds: unknown[] = [];
+
+    if (titleProvided && title) {
+      updates.push('title = ?');
+      binds.push(title);
+    }
+
+    if (completedProvided && completed !== null) {
+      updates.push('completed = ?');
+      binds.push(completed ? 1 : 0);
+      updates.push(completed ? "completed_at = datetime('now')" : 'completed_at = NULL');
+    }
+
+    updates.push("updated_at = datetime('now')");
+
+    const runResult = await db
+      .prepare(`UPDATE todos SET ${updates.join(', ')} WHERE id = ?`)
+      .bind(...binds, todoId)
+      .run();
+    const affectedRows = getRunMetaNumber(runResult, 'changes') ?? 0;
+    if (affectedRows === 0) {
+      return jsonResponse({ error: 'Todo not found' }, { status: 404 });
+    }
+
+    const row = await db
+      .prepare('SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?')
+      .bind(todoId)
+      .first();
+    const todo = normalizeTodoRow(row);
+    if (!todo) {
+      return jsonResponse({ error: 'Failed to load todo' }, { status: 500 });
+    }
+    return jsonResponse(todo);
+  }
+
+  if (method === 'DELETE' && todoId !== null) {
+    const runResult = await db.prepare('DELETE FROM todos WHERE id = ?').bind(todoId).run();
+    const affectedRows = getRunMetaNumber(runResult, 'changes') ?? 0;
+    if (affectedRows === 0) {
+      return jsonResponse({ error: 'Todo not found' }, { status: 404 });
+    }
+    return jsonResponse({ ok: true });
+  }
+
+  return jsonResponse({ error: 'Not Found' }, { status: 404 });
+}
+
 let mruby: MRuby | null = null;
 let coreLoaded = false;
 
@@ -1299,6 +1594,38 @@ export default {
     console.info(JSON.stringify(requestLogBase));
 
     try {
+      if (request.method === 'GET' && url.pathname === '/') {
+        const response = await renderTodoHome(env);
+        console.info(JSON.stringify({
+          event: 'homura_request_complete',
+          request_id: requestId,
+          path: url.pathname,
+          status: response.status,
+          loop_count: 0,
+          total_op_count: 0,
+          total_loop_ms: 0,
+          failure_reasons: [],
+          strategy: 'direct-d1-hotfix',
+        }));
+        return response;
+      }
+
+      if (url.pathname === '/api/todos' || isTodoDetailPath(url.pathname)) {
+        const response = await handleTodoApi(request, url, env);
+        console.info(JSON.stringify({
+          event: 'homura_request_complete',
+          request_id: requestId,
+          path: url.pathname,
+          status: response.status,
+          loop_count: 0,
+          total_op_count: 0,
+          total_loop_ms: 0,
+          failure_reasons: [],
+          strategy: 'direct-d1-hotfix',
+        }));
+        return response;
+      }
+
       const method = request.method;
       // Initialize mruby VM
       if (!mruby) {
@@ -1352,6 +1679,7 @@ export default {
       let currentResult: RubyResponse | null = null;
       const rubyRequest = rubyEnv;
       let requestEnvelope: RubyRequestEnvelope = { ...rubyRequest, control: { continue: false } };
+      const completedD1Results: LoopOpResult[] = [];
       let totalOperations = 0;
       let totalLoopMs = 0;
       const totalFailures: string[] = [];
@@ -1398,12 +1726,13 @@ export default {
         if (nextOps.length === 0) {
           throw new Error('Continue requested but no executable operations');
         }
+        completedD1Results.push(...nextOps);
         requestEnvelope = {
           ...rubyRequest,
           control: {
             continue: true,
             // Ruby側再実行時に、実行結果を渡す
-            ops: nextOps,
+            ops: completedD1Results.map((op) => ({ ...op })),
           },
         };
       }
