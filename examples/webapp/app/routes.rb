@@ -81,7 +81,7 @@ end
 $app.get "/" do |c|
   rows = c.db.all("SELECT id, title, completed, created_at, updated_at, completed_at FROM todos ORDER BY id DESC")
   todos = normalize_todo_list(rows)
-  c.jsx("home", { todos: todos.to_json }, status: 200)
+  c.jsx("home", { "todos" => todos.to_json }, status: 200)
 end
 
 $app.get "/api/todos" do |c|

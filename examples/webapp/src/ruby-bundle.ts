@@ -73,6 +73,7 @@ class Homura
       handler: block,
       middleware: middlewares,
     }
+    self
   end
 
   def post(path, *middlewares, &block)
@@ -81,6 +82,7 @@ class Homura
       handler: block,
       middleware: middlewares,
     }
+    self
   end
 
   def put(path, *middlewares, &block)
@@ -89,6 +91,7 @@ class Homura
       handler: block,
       middleware: middlewares,
     }
+    self
   end
 
   def patch(path, *middlewares, &block)
@@ -97,6 +100,7 @@ class Homura
       handler: block,
       middleware: middlewares,
     }
+    self
   end
 
   def delete(path, *middlewares, &block)
@@ -105,6 +109,7 @@ class Homura
       handler: block,
       middleware: middlewares,
     }
+    self
   end
 
   def match_route(method, path)
@@ -112,7 +117,19 @@ class Homura
       next unless route_method == method
       params = match_path(pattern, path)
       next unless params
-      return [route, params, pattern]
+
+      handler = nil
+      route_middleware = []
+
+      if route.is_a?(Hash)
+        handler = route[:handler] || route["handler"]
+        route_middleware = route[:middleware] || route["middleware"] || []
+      elsif route.respond_to?(:call)
+        handler = route
+      end
+
+      next unless handler
+      return [handler, route_middleware, params, pattern]
     end
     nil
   end
@@ -138,10 +155,10 @@ class Homura
       matched = match_route(method, path)
 
       response = if matched
-        handler_entry, params, pattern = matched
+        handler, route_middleware, params, pattern = matched
         request = create_context(env, params)
         after_callbacks = collect_after(method, pattern)
-        run_request_pipeline(request, method, path, pattern, handler_entry, after_callbacks)
+        run_request_pipeline(request, method, path, pattern, handler, route_middleware, after_callbacks)
       else
         alternatives = match_route_for_methods(path)
         if !alternatives.empty?
@@ -159,9 +176,15 @@ class Homura
       handle_continue_request(e.context || request)
     rescue => e
       handle_error(e, request, after_callbacks)
-    ensure
-      # placeholder: after callbacks executed in pipeline for matched route and not_found path
     end
+  end
+
+  def call_with_rescue(raw_env)
+    call(raw_env)
+  rescue ContinueRequest => e
+    handle_continue_request(e.context || create_context(normalize_env(raw_env), {}))
+  rescue => e
+    handle_error(e, create_context(normalize_env(raw_env), {}))
   end
 
   def not_found(&block)
@@ -256,10 +279,10 @@ class Homura
     params
   end
 
-  def collect_middleware(method, pattern, route_entry)
+  def collect_middleware(method, pattern, route_middleware)
     middlewares = []
     middlewares.concat(@middleware)
-    middlewares.concat(route_entry[:middleware] || [])
+    middlewares.concat(route_middleware || [])
     middlewares.concat(@route_middleware[["ALL", pattern]] || [])
     middlewares.concat(@route_middleware[[method, pattern]] || [])
     middlewares
@@ -273,11 +296,10 @@ class Homura
     afters
   end
 
-  def run_request_pipeline(request, method, path, pattern, route_entry, after_callbacks)
-    response = run_middleware(request, collect_middleware(method, pattern, route_entry), lambda {
-      call_handler(route_entry[:handler], request)
+  def run_request_pipeline(request, method, path, pattern, handler, route_middleware, after_callbacks)
+    response = run_middleware(request, collect_middleware(method, pattern, route_middleware), lambda {
+      call_handler(handler, request)
     })
-
     response = run_after(request, response, after_callbacks)
     attach_loop_ops(request, response)
   end
@@ -289,7 +311,14 @@ class Homura
       response["kv_ops"] = request.kv_ops
     end
     if request.d1_ops && !request.d1_ops.empty?
-      response["d1_ops"] = request.d1_ops
+      response["d1_ops"] = request.d1_ops.map do |op|
+        next unless op.is_a?(Hash)
+        next_op = {}
+        op.each do |key, value|
+          next_op[key.to_s] = value
+        end
+        next_op
+      end.compact
     end
     response
   end
@@ -337,8 +366,8 @@ class Homura
     response = if @on_error.nil?
       {
         "status" => 500,
-        "body" => "Internal Server Error",
-        "headers" => { "Content-Type" => "text/plain" },
+        "body" => { "error" => "#{error.class}: #{error.message}", "backtrace" => (error.backtrace || []).first(20) },
+        "headers" => { "Content-Type" => "application/json" },
       }
     elsif @on_error.arity == 0
       @on_error.call
@@ -425,9 +454,22 @@ class Homura
   end
 
   def call_handler(handler, request)
-    return nil unless handler
-    return handler.call if handler.arity == 0
-    handler.call(request)
+    current = handler
+    if current.is_a?(Hash)
+      nested = current[:handler] || current["handler"]
+      current = nested unless nested.nil?
+    end
+
+    unless current.respond_to?(:call)
+      return {
+        "status" => 500,
+        "headers" => { "Content-Type" => "text/plain" },
+        "body" => "Route handler is not callable",
+      }
+    end
+
+    return current.call if current.arity == 0
+    current.call(request)
   end
 
   def parse_status(response)
@@ -539,6 +581,13 @@ class Context
     @req.text || ""
   end
 
+  def fetch_env_value(env, key, default = nil)
+    return default if env.nil? || !env.is_a?(Hash)
+    return env[key] if env.key?(key)
+    return env[key.to_s] if env.key?(key.to_s)
+    return default
+  end
+
   def db
     @db ||= D1Client.new(self)
   end
@@ -564,9 +613,10 @@ class Context
 
   def response_status(explicit = nil)
     status = explicit || @res[:status]
-    status = status.to_i if status
-    return 200 unless status.between?(100, 599)
-    status
+    return 200 unless status
+    status = status.to_i
+    return status if status.between?(100, 599)
+    200
   end
 
   def response_headers(base_headers = {})
@@ -657,12 +707,19 @@ class Context
   end
 
   def jsx(template, props = {}, status: nil)
+    normalized_props = {}
+    if props.is_a?(Hash)
+      props.each do |key, value|
+        normalized_props[key.to_s] = value
+      end
+    end
+
     response_with_status(
       status: status,
       headers: response_headers({ "Content-Type" => "text/html" }),
       type: "jsx",
       template: template,
-      props: props,
+      props: normalized_props,
       body: nil,
     )
   end
@@ -775,7 +832,13 @@ class Context
 
   def normalize_d1_error(result)
     return "Unknown database error" unless result.is_a?(Hash)
-    message = result["error"] || result[:error] || result["meta"]&.dig("error") || result[:meta]&.dig(:error)
+    message = result["error"] || result[:error]
+    if message.nil? && result["meta"].is_a?(Hash)
+      message = result["meta"]["error"]
+    end
+    if message.nil? && result[:meta].is_a?(Hash)
+      message = result[:meta][:error]
+    end
     return message.is_a?(String) && !message.empty? ? message : "Unknown database error"
   end
 end
@@ -888,22 +951,18 @@ class Object
   end
 end
 
-HAS_JSON_PARSER = begin
-  require 'json'
-  true
-rescue LoadError
-  false
-end
-
 def parse_json(str)
   return {} if str.nil? || str.empty?
   str = str.strip
 
-  if HAS_JSON_PARSER
-    begin
-      return JSON.parse(str)
-    rescue => e
-      raise RuntimeError, "Invalid JSON: #{e.message}"
+  if Object.const_defined?(:JSON)
+    json_parser = Object.const_get(:JSON)
+    if json_parser.respond_to?(:parse)
+      begin
+        return json_parser.parse(str)
+      rescue => e
+        raise RuntimeError, "Invalid JSON: #{e.message}"
+      end
     end
   end
 
@@ -1084,7 +1143,7 @@ end
 \$app.get "/" do |c|
   rows = c.db.all("SELECT id, title, completed, created_at, updated_at, completed_at FROM todos ORDER BY id DESC")
   todos = normalize_todo_list(rows)
-  c.jsx("home", { todos: todos.to_json }, status: 200)
+  c.jsx("home", { "todos" => todos.to_json }, status: 200)
 end
 
 \$app.get "/api/todos" do |c|

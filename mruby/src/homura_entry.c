@@ -15,6 +15,7 @@
 #include <mruby/hash.h>
 #include <mruby/array.h>
 #include <mruby/variable.h>
+#include <mruby/error.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -474,6 +475,18 @@ int homura_get_output_length(void) {
     return output_length;
 }
 
+typedef struct {
+    mrb_value app;
+    mrb_value env;
+} HomuraRequestData;
+
+static HomuraRequestData g_request_data;
+
+static mrb_value homura_call_with_rescue_body(mrb_state *state, mrb_value _unused) {
+    (void)_unused;
+    return mrb_funcall(state, g_request_data.app, "call_with_rescue", 1, g_request_data.env);
+}
+
 /**
  * Convert mrb_value to JSON string representation
  */
@@ -612,6 +625,9 @@ static void value_to_json(mrb_state *mrb, mrb_value value, char *buf, size_t buf
  */
 WASM_EXPORT
 int homura_eval(void) {
+    output_length = 0;
+    output_buffer[0] = '\0';
+
     if (mrb == NULL) {
         snprintf((char*)output_buffer, sizeof(output_buffer),
                  "{\"error\":\"mruby not initialized\"}");
@@ -645,6 +661,9 @@ int homura_eval(void) {
  */
 WASM_EXPORT
 int homura_handle_request(int input_len) {
+    output_length = 0;
+    output_buffer[0] = '\0';
+
     if (mrb == NULL) {
         homura_write_error_response("mruby not initialized");
         return 0;
@@ -667,8 +686,17 @@ int homura_handle_request(int input_len) {
         return 0;
     }
 
-    mrb_value result = mrb_funcall(mrb, app, "call", 1, env);
-    if (mrb->exc) {
+    mrb_bool raised = 0;
+    g_request_data.app = app;
+    g_request_data.env = env;
+    mrb_value result = mrb_protect(
+        mrb,
+        homura_call_with_rescue_body,
+        mrb_nil_value(),
+        &raised
+    );
+
+    if (raised || mrb->exc) {
         mrb_value exc = mrb_obj_value(mrb->exc);
         mrb_value msg = mrb_funcall(mrb, exc, "message", 0);
         mrb->exc = NULL;

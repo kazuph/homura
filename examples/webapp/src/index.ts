@@ -9,6 +9,7 @@
 // Import the compiled mruby.wasm from the framework
 import mrubyWasm from '../../../mruby/build/mruby.wasm';
 import { renderTemplate } from './templates.tsx';
+import { APP_CSS } from './styles-bundle';
 import { HOMURA_CORE, USER_ROUTES } from './ruby-bundle';
 
 // Homura MessagePack v2 contract: request/response/control are
@@ -25,6 +26,7 @@ const MAX_LOOP_ITERATIONS = 16;
 const MAX_OPS_PER_LOOP = 64;
 const MAX_SQL_LENGTH = 5000;
 const MAX_SQL_BIND_COUNT = 64;
+const MAX_LONGJMP_RETRIES = 64;
 
 interface RubyRequestEnvelope {
   v: number;
@@ -920,17 +922,41 @@ let labelCounter = 1;
 class MRuby {
   private instance: WebAssembly.Instance | null = null;
 
+  private getMemory(): WebAssembly.Memory {
+    if (!this.instance) throw new Error('mruby not initialized');
+    return this.instance.exports.memory as WebAssembly.Memory;
+  }
+
+  private invokeWithLongjmpRetry<T>(label: string, fn: () => T): T {
+    let attempts = 0;
+
+    while (true) {
+      try {
+        return fn();
+      } catch (error) {
+        if (!(error instanceof WasmLongjmpException)) {
+          throw error;
+        }
+
+        if (!jmpBufRegistry.has(error.buf)) {
+          throw new Error(`[homura] unknown longjmp buffer during ${label}: ${error.buf}`);
+        }
+
+        attempts += 1;
+        if (attempts > MAX_LONGJMP_RETRIES) {
+          throw new Error(`[homura] exceeded longjmp retry budget during ${label}`);
+        }
+      }
+    }
+  }
+
   async init(): Promise<void> {
     if (this.instance) return;
-
-    const getMemory = (): WebAssembly.Memory => {
-      return this.instance!.exports.memory as WebAssembly.Memory;
-    };
 
     const wasiImports = {
       clock_res_get: (id: number, resPtr: number) => {
         try {
-          const memory = getMemory();
+          const memory = this.getMemory();
           const view = new DataView(memory.buffer);
           view.setBigUint64(resPtr, BigInt(1000000), true);
         } catch (e) { console.warn('[wasi] clock_res_get error:', e); }
@@ -938,7 +964,7 @@ class MRuby {
       },
       clock_time_get: (id: number, precision: bigint, timePtr: number) => {
         try {
-          const memory = getMemory();
+          const memory = this.getMemory();
           const view = new DataView(memory.buffer);
           view.setBigUint64(timePtr, BigInt(Date.now()) * BigInt(1000000), true);
         } catch (e) { console.warn('[wasi] clock_time_get error:', e); }
@@ -946,7 +972,7 @@ class MRuby {
       },
       fd_write: (fd: number, iovs: number, iovsLen: number, nwritten: number) => {
         try {
-          const memory = getMemory();
+          const memory = this.getMemory();
           const view = new DataView(memory.buffer);
           const decoder = new TextDecoder();
           let written = 0;
@@ -980,7 +1006,7 @@ class MRuby {
       fd_filestat_set_times: () => 0,
       fd_fdstat_get: (fd: number, statPtr: number) => {
         try {
-          const memory = getMemory();
+          const memory = this.getMemory();
           const view = new DataView(memory.buffer);
           view.setUint8(statPtr, fd <= 2 ? 2 : 4);
           view.setUint16(statPtr + 2, 0, true);
@@ -1006,7 +1032,7 @@ class MRuby {
       environ_get: () => 0,
       environ_sizes_get: (countPtr: number, sizePtr: number) => {
         try {
-          const memory = getMemory();
+          const memory = this.getMemory();
           const view = new DataView(memory.buffer);
           view.setUint32(countPtr, 0, true);
           view.setUint32(sizePtr, 0, true);
@@ -1016,7 +1042,7 @@ class MRuby {
       args_get: () => 0,
       args_sizes_get: (countPtr: number, sizePtr: number) => {
         try {
-          const memory = getMemory();
+          const memory = this.getMemory();
           const view = new DataView(memory.buffer);
           view.setUint32(countPtr, 0, true);
           view.setUint32(sizePtr, 0, true);
@@ -1029,7 +1055,7 @@ class MRuby {
       },
       random_get: (buf: number, bufLen: number) => {
         try {
-          const memory = getMemory();
+          const memory = this.getMemory();
           const bytes = new Uint8Array(memory.buffer, buf, bufLen);
           crypto.getRandomValues(bytes);
         } catch (e) { console.warn('[wasi] random_get error:', e); }
@@ -1051,8 +1077,12 @@ class MRuby {
         const view = new DataView(memory.buffer);
         view.setInt32(buf, label, true);
         view.setInt32(buf + 4, sp, true);
+        view.setInt32(buf + 8, 0, true);
       },
       __wasm_longjmp: (buf: number, value: number): void => {
+        const memory = this.instance!.exports.memory as WebAssembly.Memory;
+        const view = new DataView(memory.buffer);
+        view.setInt32(buf + 8, value || 1, true);
         throw new WasmLongjmpException(buf, value || 1);
       },
       __wasm_setjmp_test: (buf: number, curLabel: number): number => {
@@ -1060,7 +1090,9 @@ class MRuby {
         const view = new DataView(memory.buffer);
         const storedLabel = view.getInt32(buf, true);
         if (storedLabel === curLabel) {
-          return view.getInt32(buf + 8, true);
+          const value = view.getInt32(buf + 8, true);
+          view.setInt32(buf + 8, 0, true);
+          return value;
         }
         return 0;
       },
@@ -1086,7 +1118,7 @@ class MRuby {
     if (!this.instance) throw new Error('mruby not initialized');
 
     const exports = this.instance.exports as any;
-    const memory = this.instance.exports.memory as WebAssembly.Memory;
+    const memory = this.getMemory();
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
 
@@ -1100,17 +1132,12 @@ class MRuby {
 
     new Uint8Array(memory.buffer).set(codeBytes, bufferPtr);
 
-    try {
+    this.invokeWithLongjmpRetry('eval', () => {
       exports.homura_eval();
-    } catch (e) {
-      if (e instanceof WasmLongjmpException) {
-        console.error('[homura] Ruby exception (longjmp) during eval');
-        return JSON.stringify({ error: 'Ruby exception during code loading' });
-      }
-      throw e;
-    }
+      return 0;
+    });
 
-    const currentMemory = this.instance.exports.memory as WebAssembly.Memory;
+    const currentMemory = this.getMemory();
     const resultPtr = exports.homura_get_result();
     const memoryView = new Uint8Array(currentMemory.buffer);
     let resultEnd = resultPtr;
@@ -1121,6 +1148,32 @@ class MRuby {
     return decoder.decode(new Uint8Array(currentMemory.buffer, resultPtr, resultEnd - resultPtr));
   }
 
+  parseEvalFailure(result: string): string | null {
+    const trimmed = result.trim();
+    if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null;
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      if (parsed.status >= 400) {
+        const body = parsed.body;
+        if (typeof body === 'string') {
+          return body;
+        }
+        if (body && typeof body === 'object' && 'error' in body) {
+          return (body.error as string) || result;
+        }
+        return result;
+      }
+      if (typeof parsed.error === 'string') {
+        return parsed.error;
+      }
+    } catch (_error) {
+      return null;
+    }
+    return null;
+  }
+
   /**
    * Handle a request via MessagePack serialization (safe from injection).
    * Sends env as MessagePack → homura_handle_request → returns decoded response.
@@ -1129,7 +1182,7 @@ class MRuby {
     if (!this.instance) throw new Error('mruby not initialized');
 
     const exports = this.instance.exports as any;
-    const memory = this.instance.exports.memory as WebAssembly.Memory;
+    const memory = this.getMemory();
 
     const encoded = mpEncode(env);
     const bufferPtr = exports.homura_get_input_buffer();
@@ -1146,37 +1199,57 @@ class MRuby {
 
     new Uint8Array(memory.buffer).set(encoded, bufferPtr);
 
-    let success: number;
-    try {
-      success = exports.homura_handle_request(encoded.length);
-    } catch (e) {
-      if (e instanceof WasmLongjmpException) {
-        console.error('[homura] Ruby exception (longjmp) during request handling');
-        return {
-          v: HOMURA_MSGPACK_VERSION,
-          status: 500,
-          headers: { 'Content-Type': 'text/plain' },
-          body: 'Ruby exception occurred',
-        };
-      }
-      throw e;
-    }
+    const success = this.invokeWithLongjmpRetry('handle_request', () => exports.homura_handle_request(encoded.length) as number);
 
-    const outputPtr = exports.homura_get_output_buffer();
     const outputLen = exports.homura_get_output_length();
+    const outputPtr = exports.homura_get_output_buffer();
 
     if (!success || outputLen <= 0) {
+      console.error('[homura] handleRequest reported non-success', {
+        success,
+        outputLen,
+      });
+      const currentMemory = this.instance.exports.memory as WebAssembly.Memory;
+      const decoder = new TextDecoder();
+      let output = '';
+      if (outputLen > 0) {
+        const outputData = new Uint8Array(currentMemory.buffer, outputPtr, outputLen);
+        console.error('[homura] handleRequest raw output head', {
+          hex: Array.from(outputData.slice(0, 16)).map((byte) => byte.toString(16).padStart(2, '0')),
+          text: decoder.decode(outputData),
+        });
+        try {
+          const decoded = mpDecode(outputData);
+          const result = validateRubyResponse(decoded);
+          return result;
+        } catch (decodeError) {
+          output = decoder.decode(outputData);
+          console.error('[homura] Failed to decode request response:', decodeError);
+        }
+      }
       return {
         v: HOMURA_MSGPACK_VERSION,
         status: 500,
         headers: { 'Content-Type': 'text/plain' },
-        body: 'Internal Server Error',
+        body: output || 'Internal Server Error',
       };
     }
 
     const outputData = new Uint8Array(memory.buffer, outputPtr, outputLen);
-    const result = mpDecode(outputData);
-    return validateRubyResponse(result);
+    try {
+      const result = mpDecode(outputData);
+      return validateRubyResponse(result);
+    } catch (decodeError) {
+      const output = new TextDecoder().decode(outputData);
+      console.error('[homura] Failed to decode/validate successful request response:', {
+        outputLen,
+        firstByte: outputData[0],
+        hex: Array.from(outputData.slice(0, 16)).map((b) => b.toString(16).padStart(2, '0')).join(' '),
+        output,
+        error: decodeError instanceof Error ? decodeError.message : String(decodeError),
+      });
+      throw decodeError;
+    }
   }
 
   close(): void {
@@ -1201,6 +1274,19 @@ let coreLoaded = false;
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    if (request.method === 'GET' && url.pathname === '/favicon.ico') {
+      return new Response(null, { status: 204 });
+    }
+    if (request.method === 'GET' && url.pathname === '/assets/app.css') {
+      return new Response(APP_CSS, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/css; charset=utf-8',
+          'Cache-Control': 'public, max-age=3600',
+        },
+      });
+    }
+
     const requestId = createRequestId(request);
     const requestLogBase = {
       event: 'homura_request_start',
@@ -1223,14 +1309,16 @@ export default {
       // Load framework core and user routes (trusted code, eval is safe here)
       if (!coreLoaded) {
         const coreResult = mruby.eval(HOMURA_CORE);
-        if (coreResult.includes('"error"')) {
-          console.error('[homura] Failed to load core:', coreResult);
+        const coreError = mruby.parseEvalFailure(coreResult);
+        if (coreError) {
+          console.error('[homura] Failed to load core:', coreError);
           mruby = null;
           return new Response('Framework initialization failed', { status: 500 });
         }
         const routeResult = mruby.eval(USER_ROUTES);
-        if (routeResult.includes('"error"')) {
-          console.error('[homura] Failed to load routes:', routeResult);
+        const routeError = mruby.parseEvalFailure(routeResult);
+        if (routeError) {
+          console.error('[homura] Failed to load routes:', routeError);
           mruby = null;
           return new Response('Route loading failed', { status: 500 });
         }
