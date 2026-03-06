@@ -42,14 +42,62 @@ def normalize_todo_list(raw_rows)
   raw_rows.map { |row| normalize_todo_row(row) }.compact
 end
 
+def ascii_whitespace_byte?(byte)
+  byte == 9 || byte == 10 || byte == 11 || byte == 12 || byte == 13 || byte == 32
+end
+
+def trim_ascii_text(value)
+  source = value.to_s
+  left = 0
+  right = source.length - 1
+
+  while left <= right
+    byte = source.getbyte(left)
+    break unless ascii_whitespace_byte?(byte)
+    left += 1
+  end
+
+  while right >= left
+    byte = source.getbyte(right)
+    break unless ascii_whitespace_byte?(byte)
+    right -= 1
+  end
+
+  return "" if right < left
+
+  trimmed = ""
+  idx = left
+  while idx <= right
+    trimmed << source[idx]
+    idx += 1
+  end
+  trimmed
+end
+
+def parse_positive_integer_string(value)
+  text = value.to_s
+  return nil if text.empty?
+
+  number = 0
+  digit_count = 0
+  text.each_byte do |byte|
+    return nil if byte < 48 || byte > 57
+    number = (number * 10) + (byte - 48)
+    digit_count += 1
+  end
+
+  return nil if digit_count == 0
+  number > 0 ? number : nil
+end
+
 def parse_todo_title(body)
   return nil unless body.is_a?(Hash)
   title = body[:title]
   title = body["title"] if title.nil?
   return nil if title.nil?
 
-  normalized = title.to_s.strip
-  normalized.empty? ? nil : normalized
+  normalized = trim_ascii_text(title)
+  normalized.empty? ? nil : String.new(normalized)
 end
 
 def parse_todo_completed(body)
@@ -69,11 +117,15 @@ def parse_todo_payload(body)
   }
 end
 
+def todo_field_present?(body, key)
+  return false unless body.is_a?(Hash)
+  body.key?(key) || body.key?(key.to_s)
+end
+
 def parse_todo_id(ctx)
   value = ctx.req.param("id")
   return nil if value.nil?
-  id = value.to_i
-  id > 0 ? id : nil
+  parse_positive_integer_string(value)
 end
 
 # ===== Pages =====
@@ -91,88 +143,115 @@ end
 
 $app.post "/api/todos" do |c|
   body = c.json_body
-  payload = parse_todo_payload(body)
-  title = payload && payload[:title]
+  title = parse_todo_title(body)
   unless title
-    return c.json({ error: "title is required" }, status: 400)
+    c.json({ error: "title must be a non-empty string" }, status: 400)
+  else
+    result = c.db.run(
+      "INSERT INTO todos (title, completed, created_at, updated_at) VALUES (?, 0, datetime('now'), datetime('now'))",
+      [title]
+    )
+    last_row_id = result["last_row_id"]
+    last_row_id = result[:last_row_id] if last_row_id.nil?
+    todo = c.db.get(
+      "SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?",
+      [last_row_id]
+    )
+    if !last_row_id || !todo
+      c.json({ error: "Failed to create todo" }, status: 500)
+    else
+      c.json(normalize_todo_row(todo), status: 201)
+    end
   end
-
-  inserted = c.db.run(
-    "INSERT INTO todos (title, completed, created_at, updated_at) VALUES (?, 0, datetime('now'), datetime('now'))",
-    [title]
-  )
-  last_row_id = inserted["last_row_id"]
-  return c.json({ error: "Failed to insert todo" }, status: 500) unless last_row_id
-
-  todo = c.db.get(
-    "SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?",
-    [last_row_id.to_i],
-  )
-  return c.json({ error: "Failed to load created todo" }, status: 500) unless todo
-
-  c.json(normalize_todo_row(todo), status: 201)
 end
 
 $app.get "/api/todos/:id" do |c|
   id = parse_todo_id(c)
-  return c.json({ error: "Invalid todo id" }, status: 400) unless id
-
-  todo = c.db.get(
-    "SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?",
-    [id]
-  )
-  return c.json({ error: "Todo not found" }, status: 404) unless todo
-  c.json(normalize_todo_row(todo))
+  unless id
+    c.json({ error: "Invalid todo id" }, status: 400)
+  else
+    todo = c.db.get(
+      "SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?",
+      [id]
+    )
+    if todo
+      c.json(normalize_todo_row(todo))
+    else
+      c.json({ error: "Todo not found" }, status: 404)
+    end
+  end
 end
 
 $app.put "/api/todos/:id" do |c|
   id = parse_todo_id(c)
-  return c.json({ error: "Invalid todo id" }, status: 400) unless id
-
-  body = c.json_body
-  payload = parse_todo_payload(body)
-  title = payload && payload[:title]
-  completed = payload && payload[:completed]
-
-  updates = []
-  binds = []
-  if title
-    updates << "title = ?"
-    binds << title
-  end
-  unless completed.nil?
-    updates << "completed = ?"
-    binds << (completed ? 1 : 0)
-  end
-  return c.json({ error: "title or completed is required" }, status: 400) if updates.empty?
-
-  updates_sql = updates.join(", ")
-  updates << "updated_at = datetime('now')"
-  if completed.nil?
-    updates_sql = updates.join(", ")
+  unless id
+    c.json({ error: "Invalid todo id" }, status: 400)
   else
-    updates << (completed ? "completed_at = datetime('now')" : "completed_at = NULL")
-    updates_sql = updates.join(", ")
+    body = c.json_body
+    payload = parse_todo_payload(body)
+    title_present = todo_field_present?(body, :title)
+    completed_present = todo_field_present?(body, :completed)
+    title = payload && payload[:title]
+    completed = payload && payload[:completed]
+
+    if title_present && !title
+      c.json({ error: "title must be a non-empty string" }, status: 400)
+    elsif completed_present && completed.nil?
+      c.json({ error: "completed must be a boolean" }, status: 400)
+    elsif !title_present && !completed_present
+      c.json({ error: "title or completed is required" }, status: 400)
+    else
+      existing = c.db.get("SELECT id FROM todos WHERE id = ?", [id])
+      unless existing
+        c.json({ error: "Todo not found" }, status: 404)
+      else
+      updates = []
+      binds = []
+      if title_present
+        updates << "title = ?"
+        binds << title
+      end
+      if completed_present
+        updates << "completed = ?"
+        binds << (completed ? 1 : 0)
+        updates << (completed ? "completed_at = datetime('now')" : "completed_at = NULL")
+      end
+      updates << "updated_at = datetime('now')"
+
+      result = c.db.run(
+        "UPDATE todos SET #{updates.join(', ')} WHERE id = ?",
+        binds + [id]
+      )
+      affected_rows = result["affected_rows"]
+      affected_rows = result[:affected_rows] if affected_rows.nil?
+      if affected_rows.to_i > 0
+        todo = c.db.get(
+          "SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?",
+          [id]
+        )
+        c.json(normalize_todo_row(todo))
+      else
+        c.json({ error: "Todo not found" }, status: 404)
+      end
+      end
+    end
   end
-
-  run_result = c.db.run("UPDATE todos SET #{updates_sql} WHERE id = ?", binds + [id])
-  affected_rows = run_result.is_a?(Hash) ? (run_result["affected_rows"] || run_result[:affected_rows]) : nil
-  return c.json({ error: "Todo not found" }, status: 404) if affected_rows.to_i == 0
-
-  todo = c.db.get("SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?", [id])
-  return c.json({ error: "Failed to load todo" }, status: 500) unless todo
-  c.json(normalize_todo_row(todo))
 end
 
 $app.delete "/api/todos/:id" do |c|
   id = parse_todo_id(c)
-  return c.json({ error: "Invalid todo id" }, status: 400) unless id
-
-  run_result = c.db.run("DELETE FROM todos WHERE id = ?", [id])
-  affected_rows = run_result.is_a?(Hash) ? (run_result["affected_rows"] || run_result[:affected_rows]) : nil
-  return c.json({ error: "Todo not found" }, status: 404) if affected_rows.to_i == 0
-
-  c.json({ ok: true })
+  unless id
+    c.json({ error: "Invalid todo id" }, status: 400)
+  else
+    result = c.db.run("DELETE FROM todos WHERE id = ?", [id])
+    affected_rows = result["affected_rows"]
+    affected_rows = result[:affected_rows] if affected_rows.nil?
+    if affected_rows.to_i > 0
+      c.json({ ok: true, id: id })
+    else
+      c.json({ error: "Todo not found" }, status: 404)
+    end
+  end
 end
 
 $app.get "/hello/:name" do |c|

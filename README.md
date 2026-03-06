@@ -17,7 +17,7 @@ Homura (炎 - flame) brings the expressiveness of Ruby to edge computing. Write 
 │                     ┌────┴─────┐                             │
 │              ┌──────▼──────┐ ┌─▼──────────┐                 │
 │              │ mruby.wasm  │ │ D1 / KV    │                 │
-│              │ (MessagePack│ │ (direct JS) │                 │
+│              │ (MessagePack│ │ (binding adapter) │          │
 │              └──────┬──────┘ └────────────┘                 │
 │              ┌──────▼──────┐                                │
 │              │  routes.rb  │                                │
@@ -157,7 +157,7 @@ homura/
 ├── examples/
 │   └── webapp/
 │       ├── src/
-│       │   ├── index.ts       # Worker entry + D1 handler + mruby integration
+│       │   ├── index.ts       # Worker entry + MessagePack bridge + binding execution
 │       │   ├── templates.tsx   # JSX templates (To-Do app UI)
 │       │   ├── ruby-bundle.ts  # Bundled Ruby code (auto-generated)
 │       │   ├── styles-bundle.ts # Bundled CSS (auto-generated)
@@ -184,7 +184,7 @@ homura/
 - [x] JSX template engine
 - [x] Middleware system (`use`/`next`)
 - [x] JSON body parsing (`json_body`)
-- [ ] Query string parsing
+- [x] Query string parsing
 
 ## Rubyファースト運用ガイドライン
 

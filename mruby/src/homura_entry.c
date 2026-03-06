@@ -188,17 +188,28 @@ static int mp_encode_int(mp_writer *w, int64_t val) {
 }
 
 static int mp_encode_value(mrb_state *mrb, mp_writer *w, mrb_value value) {
+    int ai = mrb_gc_arena_save(mrb);
+    mrb_gc_protect(mrb, value);
+
     if (mrb_nil_p(value)) {
-        return mp_write_byte(w, 0xc0);
+        int ok = mp_write_byte(w, 0xc0);
+        mrb_gc_arena_restore(mrb, ai);
+        return ok;
     }
     if (mrb_true_p(value)) {
-        return mp_write_byte(w, 0xc3);
+        int ok = mp_write_byte(w, 0xc3);
+        mrb_gc_arena_restore(mrb, ai);
+        return ok;
     }
     if (mrb_false_p(value)) {
-        return mp_write_byte(w, 0xc2);
+        int ok = mp_write_byte(w, 0xc2);
+        mrb_gc_arena_restore(mrb, ai);
+        return ok;
     }
     if (mrb_integer_p(value)) {
-        return mp_encode_int(w, (int64_t)mrb_integer(value));
+        int ok = mp_encode_int(w, (int64_t)mrb_integer(value));
+        mrb_gc_arena_restore(mrb, ai);
+        return ok;
     }
     if (mrb_float_p(value)) {
         double f = mrb_float(value);
@@ -207,60 +218,108 @@ static int mp_encode_value(mrb_state *mrb, mp_writer *w, mrb_value value) {
             uint64_t u;
         } conv;
         conv.f = f;
-        if (!mp_write_byte(w, 0xcb)) return 0;
-        return mp_write_u64(w, conv.u);
+        if (!mp_write_byte(w, 0xcb)) {
+            mrb_gc_arena_restore(mrb, ai);
+            return 0;
+        }
+        int ok = mp_write_u64(w, conv.u);
+        mrb_gc_arena_restore(mrb, ai);
+        return ok;
     }
     if (mrb_string_p(value)) {
-        return mp_encode_str(w, RSTRING_PTR(value), RSTRING_LEN(value));
+        int ok = mp_encode_str(w, RSTRING_PTR(value), RSTRING_LEN(value));
+        mrb_gc_arena_restore(mrb, ai);
+        return ok;
     }
     if (mrb_symbol_p(value)) {
         mrb_int len = 0;
         const char *name = mrb_sym_name_len(mrb, mrb_symbol(value), &len);
-        return mp_encode_str(w, name, (size_t)len);
+        int ok = mp_encode_str(w, name, (size_t)len);
+        mrb_gc_arena_restore(mrb, ai);
+        return ok;
     }
     if (mrb_hash_p(value)) {
         mrb_value keys = mrb_hash_keys(mrb, value);
+        mrb_gc_protect(mrb, keys);
         mrb_int len = RARRAY_LEN(keys);
-        if (!mp_encode_map_header(w, (uint32_t)len)) return 0;
+        if (!mp_encode_map_header(w, (uint32_t)len)) {
+            mrb_gc_arena_restore(mrb, ai);
+            return 0;
+        }
         for (mrb_int i = 0; i < len; i++) {
             mrb_value key = mrb_ary_ref(mrb, keys, i);
             mrb_value val = mrb_hash_get(mrb, value, key);
+            mrb_gc_protect(mrb, key);
+            mrb_gc_protect(mrb, val);
             if (mrb_symbol_p(key)) {
                 mrb_int klen = 0;
                 const char *kname = mrb_sym_name_len(mrb, mrb_symbol(key), &klen);
-                if (!mp_encode_str(w, kname, (size_t)klen)) return 0;
+                if (!mp_encode_str(w, kname, (size_t)klen)) {
+                    mrb_gc_arena_restore(mrb, ai);
+                    return 0;
+                }
             } else if (mrb_string_p(key)) {
-                if (!mp_encode_str(w, RSTRING_PTR(key), RSTRING_LEN(key))) return 0;
+                if (!mp_encode_str(w, RSTRING_PTR(key), RSTRING_LEN(key))) {
+                    mrb_gc_arena_restore(mrb, ai);
+                    return 0;
+                }
             } else {
                 mrb_value kstr = mrb_any_to_s(mrb, key);
-                if (!mp_encode_str(w, RSTRING_PTR(kstr), RSTRING_LEN(kstr))) return 0;
+                mrb_gc_protect(mrb, kstr);
+                if (!mp_encode_str(w, RSTRING_PTR(kstr), RSTRING_LEN(kstr))) {
+                    mrb_gc_arena_restore(mrb, ai);
+                    return 0;
+                }
             }
-            if (!mp_encode_value(mrb, w, val)) return 0;
+            if (!mp_encode_value(mrb, w, val)) {
+                mrb_gc_arena_restore(mrb, ai);
+                return 0;
+            }
         }
+        mrb_gc_arena_restore(mrb, ai);
         return 1;
     }
     if (mrb_array_p(value)) {
         mrb_int len = RARRAY_LEN(value);
-        if (!mp_encode_array_header(w, (uint32_t)len)) return 0;
-        for (mrb_int i = 0; i < len; i++) {
-            if (!mp_encode_value(mrb, w, mrb_ary_ref(mrb, value, i))) return 0;
+        if (!mp_encode_array_header(w, (uint32_t)len)) {
+            mrb_gc_arena_restore(mrb, ai);
+            return 0;
         }
+        for (mrb_int i = 0; i < len; i++) {
+            mrb_value elem = mrb_ary_ref(mrb, value, i);
+            mrb_gc_protect(mrb, elem);
+            if (!mp_encode_value(mrb, w, elem)) {
+                mrb_gc_arena_restore(mrb, ai);
+                return 0;
+            }
+        }
+        mrb_gc_arena_restore(mrb, ai);
         return 1;
     }
 
     mrb_value str = mrb_any_to_s(mrb, value);
-    return mp_encode_str(w, RSTRING_PTR(str), RSTRING_LEN(str));
+    mrb_gc_protect(mrb, str);
+    int ok = mp_encode_str(w, RSTRING_PTR(str), RSTRING_LEN(str));
+    mrb_gc_arena_restore(mrb, ai);
+    return ok;
 }
 
 static mrb_value mp_decode_value(mrb_state *mrb, mp_reader *r);
 
 static mrb_value mp_decode_map(mrb_state *mrb, mp_reader *r, uint32_t count, bool symbol_keys) {
+    int ai = mrb_gc_arena_save(mrb);
     mrb_value hash = mrb_hash_new(mrb);
+    mrb_gc_protect(mrb, hash);
     for (uint32_t i = 0; i < count; i++) {
         mrb_value key = mp_decode_value(mrb, r);
-        if (r->error) return mrb_nil_value();
+        if (r->error) {
+            mrb_gc_arena_restore(mrb, ai);
+            return mrb_nil_value();
+        }
+        mrb_gc_protect(mrb, key);
         if (!mrb_string_p(key)) {
             key = mrb_any_to_s(mrb, key);
+            mrb_gc_protect(mrb, key);
         }
         mrb_value map_key = key;
         if (symbol_keys) {
@@ -268,19 +327,31 @@ static mrb_value mp_decode_map(mrb_state *mrb, mp_reader *r, uint32_t count, boo
             map_key = mrb_symbol_value(sym);
         }
         mrb_value val = mp_decode_value(mrb, r);
-        if (r->error) return mrb_nil_value();
+        if (r->error) {
+            mrb_gc_arena_restore(mrb, ai);
+            return mrb_nil_value();
+        }
+        mrb_gc_protect(mrb, val);
         mrb_hash_set(mrb, hash, map_key, val);
     }
+    mrb_gc_arena_restore(mrb, ai);
     return hash;
 }
 
 static mrb_value mp_decode_array(mrb_state *mrb, mp_reader *r, uint32_t count) {
+    int ai = mrb_gc_arena_save(mrb);
     mrb_value ary = mrb_ary_new_capa(mrb, count);
+    mrb_gc_protect(mrb, ary);
     for (uint32_t i = 0; i < count; i++) {
         mrb_value val = mp_decode_value(mrb, r);
-        if (r->error) return mrb_nil_value();
+        if (r->error) {
+            mrb_gc_arena_restore(mrb, ai);
+            return mrb_nil_value();
+        }
+        mrb_gc_protect(mrb, val);
         mrb_ary_push(mrb, ary, val);
     }
+    mrb_gc_arena_restore(mrb, ai);
     return ary;
 }
 
@@ -487,6 +558,11 @@ static mrb_value homura_call_with_rescue_body(mrb_state *state, mrb_value _unuse
     return mrb_funcall(state, g_request_data.app, "call_with_rescue", 1, g_request_data.env);
 }
 
+static mrb_value homura_eval_body(mrb_state *state, mrb_value _unused) {
+    (void)_unused;
+    return mrb_load_string(state, (const char*)input_buffer);
+}
+
 /**
  * Convert mrb_value to JSON string representation
  */
@@ -635,11 +711,16 @@ int homura_eval(void) {
         return 0;
     }
 
-    const char *code = (const char*)input_buffer;
+    int ai = mrb_gc_arena_save(mrb);
+    mrb_bool raised = 0;
+    mrb_value result = mrb_protect(
+        mrb,
+        homura_eval_body,
+        mrb_nil_value(),
+        &raised
+    );
 
-    mrb_value result = mrb_load_string(mrb, code);
-
-    if (mrb->exc) {
+    if (raised || mrb->exc) {
         mrb_value exc = mrb_obj_value(mrb->exc);
         mrb_value msg = mrb_funcall(mrb, exc, "message", 0);
         mrb->exc = NULL;
@@ -648,11 +729,14 @@ int homura_eval(void) {
                  "{\"error\":\"%s\"}",
                  mrb_string_p(msg) ? RSTRING_PTR(msg) : "Unknown error");
         output_length = (int)strnlen((char*)output_buffer, HOMURA_BUFFER_SIZE);
+        mrb_gc_arena_restore(mrb, ai);
         return 0;
     }
 
+    mrb_gc_protect(mrb, result);
     value_to_json(mrb, result, (char*)output_buffer, sizeof(output_buffer));
     output_length = (int)strnlen((char*)output_buffer, HOMURA_BUFFER_SIZE);
+    mrb_gc_arena_restore(mrb, ai);
     return 1;
 }
 
@@ -673,18 +757,24 @@ int homura_handle_request(int input_len) {
         return 0;
     }
 
+    int ai = mrb_gc_arena_save(mrb);
+
     mp_reader reader = { input_buffer, (size_t)input_len, 0, 0 };
     mrb_value env = mp_decode_env(mrb, &reader);
     if (reader.error) {
         homura_write_error_response("invalid msgpack");
+        mrb_gc_arena_restore(mrb, ai);
         return 0;
     }
+    mrb_gc_protect(mrb, env);
 
     mrb_value app = mrb_gv_get(mrb, mrb_intern_cstr(mrb, "$app"));
     if (mrb_nil_p(app)) {
         homura_write_error_response("$app not defined");
+        mrb_gc_arena_restore(mrb, ai);
         return 0;
     }
+    mrb_gc_protect(mrb, app);
 
     mrb_bool raised = 0;
     g_request_data.app = app;
@@ -701,16 +791,20 @@ int homura_handle_request(int input_len) {
         mrb_value msg = mrb_funcall(mrb, exc, "message", 0);
         mrb->exc = NULL;
         homura_write_error_response(mrb_string_p(msg) ? RSTRING_PTR(msg) : "Ruby error");
+        mrb_gc_arena_restore(mrb, ai);
         return 0;
     }
 
+    mrb_gc_protect(mrb, result);
     mp_writer writer = { output_buffer, HOMURA_BUFFER_SIZE, 0, 0 };
     if (!mp_encode_value(mrb, &writer, result) || writer.error) {
         homura_write_error_response("response too large");
+        mrb_gc_arena_restore(mrb, ai);
         return 0;
     }
 
     output_length = (int)writer.pos;
+    mrb_gc_arena_restore(mrb, ai);
     return 1;
 }
 

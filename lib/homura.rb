@@ -2,13 +2,9 @@
 # This file is the framework core - users don't need to modify this
 
 class ContinueRequest < StandardError
-  attr_reader :context
-
-  def initialize(context)
-    @context = context
-    super("Homura request requires continuation")
-  end
 end
+
+$homura_pending_continue_context = nil
 
 class Homura
   VERSION = 2
@@ -147,6 +143,7 @@ class Homura
     path = env[:path] || "/"
     request = create_context(env, {})
     after_callbacks = @after
+    $homura_pending_continue_context = nil
 
     begin
       matched = match_route(method, path)
@@ -169,18 +166,26 @@ class Homura
       end
 
       with_protocol_version(response)
-    rescue ContinueRequest => e
-      handle_continue_request(e.context || request)
+    rescue ContinueRequest
+      context = $homura_pending_continue_context || request
+      $homura_pending_continue_context = nil
+      handle_continue_request(context)
     rescue => e
+      $homura_pending_continue_context = nil
       handle_error(e, request, after_callbacks)
+    ensure
+      $homura_pending_continue_context = nil
     end
   end
 
   def call_with_rescue(raw_env)
     call(raw_env)
-  rescue ContinueRequest => e
-    handle_continue_request(e.context || create_context(normalize_env(raw_env), {}))
+  rescue ContinueRequest
+    context = $homura_pending_continue_context || create_context(normalize_env(raw_env), {})
+    $homura_pending_continue_context = nil
+    handle_continue_request(context)
   rescue => e
+    $homura_pending_continue_context = nil
     handle_error(e, create_context(normalize_env(raw_env), {}))
   end
 
@@ -663,7 +668,8 @@ class Context
 
     op_entry = build_d1_entry(op, sql, binds, statements)
     @d1_ops << op_entry
-    raise ContinueRequest.new(self)
+    $homura_pending_continue_context = self
+    raise ContinueRequest, "Homura request requires continuation"
   end
 
   def d1_ops
@@ -765,6 +771,9 @@ class Context
       op = next_result["op"] || next_result[:op]
       kind = next_result["kind"] || next_result[:kind]
       next unless kind == "d1" || kind.nil? && ["all", "first", "get", "run", "exec", "batch", "transaction"].include?(op.to_s)
+      unless d1_op_matches?(expected_op, op)
+        raise RuntimeError, "Unexpected D1 result order: expected #{expected_op}, got #{op}"
+      end
 
       ok = next_result["ok"] || next_result[:ok]
       if ok == false || ok == "false"
@@ -782,20 +791,34 @@ class Context
     request_d1(op, sql, binds, nil)
   end
 
+  def d1_op_matches?(expected_op, actual_op)
+    expected = expected_op.to_s
+    actual = actual_op.to_s
+    return true if expected == actual
+    return true if expected == "get" && actual == "first"
+    return true if expected == "first" && actual == "get"
+    false
+  end
+
   def build_d1_entry(op, sql, binds, statements)
     if statements
       normalized_statements = statements.map do |statement|
         next unless statement.is_a?(Hash)
         {
           op: statement[:op] || statement["op"],
-          sql: statement[:sql] || statement["sql"],
+          sql: normalize_d1_sql(statement[:sql] || statement["sql"]),
           binds: normalize_d1_binds(statement[:binds] || statement["binds"]),
         }
       end.compact
       { op: op, statements: normalized_statements }
     else
-      { op: op, sql: sql, binds: normalize_d1_binds(binds) }
+      { op: op, sql: normalize_d1_sql(sql), binds: normalize_d1_binds(binds) }
     end
+  end
+
+  def normalize_d1_sql(sql)
+    return nil if sql.nil?
+    String.new(sql.to_s)
   end
 
   def normalize_d1_payload(expected_op, payload)
@@ -823,8 +846,19 @@ class Context
 
   def normalize_d1_binds(raw_bind)
     return [] if raw_bind.nil?
-    return raw_bind if raw_bind.is_a?(Array)
-    raise ArgumentError, "D1 bind parameters must be an array"
+    unless raw_bind.is_a?(Array)
+      raise ArgumentError, "D1 bind parameters must be an array"
+    end
+    raw_bind.map { |value| normalize_d1_bind_value(value) }
+  end
+
+  def normalize_d1_bind_value(value)
+    return nil if value.nil?
+    return true if value == true
+    return false if value == false
+    return value if value.is_a?(Integer) || value.is_a?(Float)
+    return String.new(value.to_s) if value.is_a?(String) || value.is_a?(Symbol)
+    raise ArgumentError, "D1 bind parameters must be scalar values"
   end
 
   def normalize_d1_error(result)
@@ -859,16 +893,7 @@ class D1Client
 
   def run(sql, binds = nil)
     result = @context.request_d1("run", sql, binds || [])
-    return result unless result.is_a?(Hash)
-    if result.key?("result") || result.key?(:result) || result.key?("meta") || result.key?(:meta)
-      meta = result["meta"] || result[:meta]
-      {
-        "result" => result["result"] || result[:result],
-        "affected_rows" => extract_meta_number(meta, "changes") || extract_meta_number(meta, "affected_rows"),
-        "last_row_id" => extract_meta_number(meta, "last_row_id"),
-      }
-    end
-    result
+    result.is_a?(Hash) ? result : {}
   end
 
   def exec(sql)
@@ -903,14 +928,6 @@ class D1Client
     return [] if raw.nil?
     return raw if raw.is_a?(Array)
     raise ArgumentError, "D1 bind parameters must be an array"
-  end
-
-  def extract_meta_number(meta, key)
-    return nil unless meta.is_a?(Hash)
-    value = meta[key] || meta[key.to_sym]
-    return value.to_i if value.is_a?(Numeric)
-    return value.to_i if value.is_a?(String) && !value.empty?
-    nil
   end
 end
 
@@ -991,9 +1008,274 @@ def json_number_string?(str)
   idx == str.length
 end
 
+def json_whitespace_byte?(byte)
+  byte == 9 || byte == 10 || byte == 13 || byte == 32
+end
+
+def json_skip_whitespace(str, idx)
+  while idx < str.length && json_whitespace_byte?(str.getbyte(idx))
+    idx += 1
+  end
+  idx
+end
+
+def json_hex_value(byte)
+  return byte - 48 if byte >= 48 && byte <= 57
+  return byte - 55 if byte >= 65 && byte <= 70
+  return byte - 87 if byte >= 97 && byte <= 102
+  nil
+end
+
+def json_append_codepoint(out, codepoint)
+  if codepoint <= 0x7f
+    out << codepoint.chr
+  elsif codepoint <= 0x7ff
+    out << (0xc0 | (codepoint >> 6)).chr
+    out << (0x80 | (codepoint & 0x3f)).chr
+  elsif codepoint <= 0xffff
+    out << (0xe0 | (codepoint >> 12)).chr
+    out << (0x80 | ((codepoint >> 6) & 0x3f)).chr
+    out << (0x80 | (codepoint & 0x3f)).chr
+  else
+    out << (0xf0 | (codepoint >> 18)).chr
+    out << (0x80 | ((codepoint >> 12) & 0x3f)).chr
+    out << (0x80 | ((codepoint >> 6) & 0x3f)).chr
+    out << (0x80 | (codepoint & 0x3f)).chr
+  end
+end
+
+def json_parse_string(str, idx)
+  raise RuntimeError, "Invalid JSON: expected string" unless str.getbyte(idx) == 34
+
+  idx += 1
+  out = ""
+
+  while idx < str.length
+    byte = str.getbyte(idx)
+
+    if byte == 34
+      return [out, idx + 1]
+    end
+
+    if byte == 92
+      idx += 1
+      raise RuntimeError, "Invalid JSON: incomplete escape" if idx >= str.length
+
+      escape = str.getbyte(idx)
+      case escape
+      when 34, 47, 92
+        out << escape.chr
+      when 98
+        out << "\b"
+      when 102
+        out << "\f"
+      when 110
+        out << "\n"
+      when 114
+        out << "\r"
+      when 116
+        out << "\t"
+      when 117
+        codepoint = 0
+        4.times do
+          idx += 1
+          raise RuntimeError, "Invalid JSON: incomplete unicode escape" if idx >= str.length
+          hex = json_hex_value(str.getbyte(idx))
+          raise RuntimeError, "Invalid JSON: invalid unicode escape" if hex.nil?
+          codepoint = (codepoint * 16) + hex
+        end
+        json_append_codepoint(out, codepoint)
+      else
+        raise RuntimeError, "Invalid JSON: invalid escape"
+      end
+    else
+      raise RuntimeError, "Invalid JSON: control character in string" if byte < 0x20
+      out << byte.chr
+    end
+
+    idx += 1
+  end
+
+  raise RuntimeError, "Invalid JSON: unterminated string"
+end
+
+def json_parse_integer_token(token)
+  negative = false
+  idx = 0
+
+  if token.getbyte(0) == 45
+    negative = true
+    idx = 1
+  end
+
+  value = 0
+  digit_count = 0
+  while idx < token.length
+    byte = token.getbyte(idx)
+    break if byte < 48 || byte > 57
+    value = (value * 10) + (byte - 48)
+    digit_count += 1
+    idx += 1
+  end
+
+  raise RuntimeError, "Invalid JSON: invalid number" if digit_count == 0
+  negative ? -value : value
+end
+
+def json_parse_number(str, idx)
+  start = idx
+  byte = str.getbyte(idx)
+  idx += 1 if byte == 45
+
+  raise RuntimeError, "Invalid JSON: invalid number" if idx >= str.length
+
+  if str.getbyte(idx) == 48
+    idx += 1
+  else
+    digits = 0
+    while idx < str.length
+      byte = str.getbyte(idx)
+      break if byte < 48 || byte > 57
+      idx += 1
+      digits += 1
+    end
+    raise RuntimeError, "Invalid JSON: invalid number" if digits == 0
+  end
+
+  is_float = false
+
+  if idx < str.length && str.getbyte(idx) == 46
+    is_float = true
+    idx += 1
+    digits = 0
+    while idx < str.length
+      byte = str.getbyte(idx)
+      break if byte < 48 || byte > 57
+      idx += 1
+      digits += 1
+    end
+    raise RuntimeError, "Invalid JSON: invalid number" if digits == 0
+  end
+
+  if idx < str.length
+    byte = str.getbyte(idx)
+    if byte == 101 || byte == 69
+      is_float = true
+      idx += 1
+      if idx < str.length
+        sign = str.getbyte(idx)
+        idx += 1 if sign == 43 || sign == 45
+      end
+      digits = 0
+      while idx < str.length
+        digit = str.getbyte(idx)
+        break if digit < 48 || digit > 57
+        idx += 1
+        digits += 1
+      end
+      raise RuntimeError, "Invalid JSON: invalid number" if digits == 0
+    end
+  end
+
+  token = ""
+  cursor = start
+  while cursor < idx
+    token << str.getbyte(cursor).chr
+    cursor += 1
+  end
+
+  value = is_float ? token.to_f : json_parse_integer_token(token)
+  [value, idx]
+end
+
+def json_parse_array(str, idx)
+  values = []
+  idx += 1
+  idx = json_skip_whitespace(str, idx)
+  return [values, idx + 1] if idx < str.length && str.getbyte(idx) == 93
+
+  loop do
+    value, idx = json_parse_value(str, idx)
+    values << value
+    idx = json_skip_whitespace(str, idx)
+    raise RuntimeError, "Invalid JSON: unterminated array" if idx >= str.length
+
+    byte = str.getbyte(idx)
+    if byte == 44
+      idx = json_skip_whitespace(str, idx + 1)
+      next
+    end
+    if byte == 93
+      return [values, idx + 1]
+    end
+
+    raise RuntimeError, "Invalid JSON: malformed array"
+  end
+end
+
+def json_parse_object(str, idx)
+  result = {}
+  idx += 1
+  idx = json_skip_whitespace(str, idx)
+  return [result, idx + 1] if idx < str.length && str.getbyte(idx) == 125
+
+  loop do
+    key, idx = json_parse_string(str, idx)
+    idx = json_skip_whitespace(str, idx)
+    raise RuntimeError, "Invalid JSON: malformed object" if idx >= str.length || str.getbyte(idx) != 58
+
+    idx = json_skip_whitespace(str, idx + 1)
+    value, idx = json_parse_value(str, idx)
+    result[key] = value
+    idx = json_skip_whitespace(str, idx)
+    raise RuntimeError, "Invalid JSON: unterminated object" if idx >= str.length
+
+    byte = str.getbyte(idx)
+    if byte == 44
+      idx = json_skip_whitespace(str, idx + 1)
+      next
+    end
+    if byte == 125
+      return [result, idx + 1]
+    end
+
+    raise RuntimeError, "Invalid JSON: malformed object"
+  end
+end
+
+def json_parse_value(str, idx)
+  idx = json_skip_whitespace(str, idx)
+  raise RuntimeError, "Invalid JSON: unexpected end of input" if idx >= str.length
+
+  byte = str.getbyte(idx)
+
+  if byte == 34
+    return json_parse_string(str, idx)
+  end
+  if byte == 123
+    return json_parse_object(str, idx)
+  end
+  if byte == 91
+    return json_parse_array(str, idx)
+  end
+  if byte == 116 && str[idx, 4] == "true"
+    return [true, idx + 4]
+  end
+  if byte == 102 && str[idx, 5] == "false"
+    return [false, idx + 5]
+  end
+  if byte == 110 && str[idx, 4] == "null"
+    return [nil, idx + 4]
+  end
+  if byte == 45 || (byte >= 48 && byte <= 57)
+    return json_parse_number(str, idx)
+  end
+
+  raise RuntimeError, "Invalid JSON"
+end
+
 def parse_json(str)
   return {} if str.nil? || str.empty?
-  str = str.strip
 
   if Object.const_defined?(:JSON)
     json_parser = Object.const_get(:JSON)
@@ -1006,95 +1288,12 @@ def parse_json(str)
     end
   end
 
-  return nil if str == "null"
-  return true if str == "true"
-  return false if str == "false"
-
-  if json_number_string?(str)
-    return (str.include?(".") || str.include?("e") || str.include?("E")) ? str.to_f : str.to_i
-  end
-
-  if str.start_with?("\"") && str.end_with?("\"")
-    return str[1..-2]
-  end
-
-  if str.start_with?("{") && str.end_with?("}")
-    result = {}
-    content = str[1..-2].strip
-    return result if content.empty?
-
-    pairs = []
-    depth = 0
-    current = ""
-    content.each_char do |c|
-      if c == "{" || c == "["
-        depth += 1
-        current << c
-      elsif c == "}" || c == "]"
-        depth -= 1
-        current << c
-      elsif c == "," && depth == 0
-        pairs << current.strip
-        current = ""
-      else
-        current << c
-      end
-    end
-    pairs << current.strip unless current.empty?
-
-    pairs.each do |pair|
-      colon_idx = nil
-      in_string = false
-      pair.each_char.with_index do |c, i|
-        if c == "\"" && (i == 0 || pair[i-1] != "\\")
-          in_string = !in_string
-        elsif c == ":" && !in_string
-          colon_idx = i
-          break
-        end
-      end
-
-      raise RuntimeError, "Invalid JSON: malformed object" unless colon_idx
-      key_part = pair[0...colon_idx].strip
-      val_part = pair[(colon_idx+1)..-1].strip
-      if key_part.start_with?("\"") && key_part.end_with?("\"")
-        key = key_part[1..-2]
-        result[key] = parse_json(val_part)
-      else
-        raise RuntimeError, "Invalid JSON: invalid object key"
-      end
-    end
-    return result
-  end
-
-  if str.start_with?("[") && str.end_with?("]")
-    content = str[1..-2].strip
-    return [] if content.empty?
-
-    values = []
-    depth = 0
-    in_string = false
-    current = ""
-    content.each_char.with_index do |c, i|
-      if c == "\"" && (i == 0 || content[i - 1] != "\\")
-        in_string = !in_string
-      end
-      if !in_string && (c == "[" || c == "{")
-        depth += 1
-      elsif !in_string && (c == "]" || c == "}")
-        depth -= 1
-      elsif c == "," && depth == 0
-        values << parse_json(current.strip)
-        current = ""
-        next
-      end
-      current << c
-    end
-    values << parse_json(current.strip) unless current.empty?
-    return values
-  end
-
-  raise RuntimeError, "Invalid JSON"
+  source = str.to_s
+  idx = json_skip_whitespace(source, 0)
+  value, idx = json_parse_value(source, idx)
+  idx = json_skip_whitespace(source, idx)
+  raise RuntimeError, "Invalid JSON: trailing content" unless idx == source.length
+  value
 end
 
 $app = Homura.new

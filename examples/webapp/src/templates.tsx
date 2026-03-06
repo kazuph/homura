@@ -122,6 +122,14 @@ const Home = ({ todos }: TemplateLocals) => (
         const inputEl = document.getElementById('todo-input');
         const countEl = document.getElementById('todo-count');
 
+        async function refreshTodos() {
+          var res = await fetch('/api/todos');
+          if (!res.ok) return false;
+          todos = await res.json();
+          renderTodos();
+          return true;
+        }
+
         function renderTodos() {
           const filtered = todos.filter(function(t) {
             if (currentFilter === 'active') return !t.completed;
@@ -164,9 +172,7 @@ const Home = ({ todos }: TemplateLocals) => (
             body: JSON.stringify({ title: title })
           });
           if (res.ok) {
-            var todo = await res.json();
-            todos.unshift(todo);
-            renderTodos();
+            await refreshTodos();
           }
         }
 
@@ -180,9 +186,7 @@ const Home = ({ todos }: TemplateLocals) => (
             body: JSON.stringify({ completed: e.target.checked })
           });
           if (res.ok) {
-            var updated = await res.json();
-            todos = todos.map(function(t) { return t.id == id ? updated : t; });
-            renderTodos();
+            await refreshTodos();
           }
         });
 
@@ -192,8 +196,7 @@ const Home = ({ todos }: TemplateLocals) => (
           var id = li.dataset.id;
           var res = await fetch('/api/todos/' + id, { method: 'DELETE' });
           if (res.ok) {
-            todos = todos.filter(function(t) { return t.id != id; });
-            renderTodos();
+            await refreshTodos();
           }
         });
 
