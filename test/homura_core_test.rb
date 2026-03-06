@@ -116,6 +116,46 @@ class HomuraCoreTest < Minitest::Test
     assert_equal "bread, butter", result["body"]["notes"]
   end
 
+  def test_json_body_can_return_string_field_directly
+    app = Homura.new
+    app.post("/todos") do |ctx|
+      ctx.json(ctx.json_body["title"])
+    end
+
+    result = app.call(
+      build_env(
+        "POST",
+        "/todos",
+        body: '{"title":"hello"}',
+        headers: { "content-type" => "application/json" },
+      ),
+    )
+
+    assert_equal 200, result["status"]
+    assert_equal "hello", result["body"]
+  end
+
+  def test_json_body_supports_booleans_and_arrays
+    app = Homura.new
+    app.post("/todos") do |ctx|
+      ctx.json(ctx.json_body)
+    end
+
+    result = app.call(
+      build_env(
+        "POST",
+        "/todos",
+        body: '{"title":"hello","completed":true,"tags":["a","b"]}',
+        headers: { "content-type" => "application/json" },
+      ),
+    )
+
+    assert_equal 200, result["status"]
+    assert_equal "hello", result["body"]["title"]
+    assert_equal true, result["body"]["completed"]
+    assert_equal ["a", "b"], result["body"]["tags"]
+  end
+
   def test_d1_result_order_mismatch_is_rejected
     app = Homura.new
     app.get("/todos") do |ctx|

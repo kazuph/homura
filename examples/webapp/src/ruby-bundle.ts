@@ -1451,12 +1451,12 @@ end
   unless title
     c.json({ error: "title must be a non-empty string" }, status: 400)
   else
-    result = c.db.run(
+    c.db.run(
       "INSERT INTO todos (title, completed, created_at, updated_at) VALUES (?, 0, datetime('now'), datetime('now'))",
       [title]
     )
-    last_row_id = result["last_row_id"]
-    last_row_id = result[:last_row_id] if last_row_id.nil?
+    insert_meta = c.db.get("SELECT last_insert_rowid() AS id")
+    last_row_id = insert_meta && (insert_meta["id"] || insert_meta[:id])
     todo = c.db.get(
       "SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?",
       [last_row_id]
@@ -1522,20 +1522,18 @@ end
       end
       updates << "updated_at = datetime('now')"
 
-      result = c.db.run(
+      c.db.run(
         "UPDATE todos SET #{updates.join(', ')} WHERE id = ?",
         binds + [id]
       )
-      affected_rows = result["affected_rows"]
-      affected_rows = result[:affected_rows] if affected_rows.nil?
-      if affected_rows.to_i > 0
-        todo = c.db.get(
-          "SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?",
-          [id]
-        )
+      todo = c.db.get(
+        "SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?",
+        [id]
+      )
+      if todo
         c.json(normalize_todo_row(todo))
       else
-        c.json({ error: "Todo not found" }, status: 404)
+        c.json({ error: "Failed to load updated todo" }, status: 500)
       end
       end
     end
@@ -1547,10 +1545,9 @@ end
   unless id
     c.json({ error: "Invalid todo id" }, status: 400)
   else
-    result = c.db.run("DELETE FROM todos WHERE id = ?", [id])
-    affected_rows = result["affected_rows"]
-    affected_rows = result[:affected_rows] if affected_rows.nil?
-    if affected_rows.to_i > 0
+    existing = c.db.get("SELECT id FROM todos WHERE id = ?", [id])
+    if existing
+      c.db.run("DELETE FROM todos WHERE id = ?", [id])
       c.json({ ok: true, id: id })
     else
       c.json({ error: "Todo not found" }, status: 404)
