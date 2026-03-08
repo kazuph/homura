@@ -43,16 +43,57 @@
   - Content-Typeバリデーションミドルウェア例
   - ドキュメント整合（README/CONTINUITY更新）
 
-### Now（現在）
-- **Phase 4 完了！** 🎉
-- To-Do アプリ（D1永続化）がローカルで動作中
-- 開発サーバー: `http://localhost:8787`
+- **Phase 5: Core Routing Completion**
+  - `options`, `all`, `on` メソッド追加
+  - ワイルドカードルート `/api/*`
+  - オプショナルパラメータ `:type?`
+  - サブアプリマウント `route(path, sub_app)`
+  - `base_path(prefix)` ベースパス設定
+- **Phase 6: Context API Completion**
+  - `c.set(key, value)` / `c.get(key)` 変数ストア
+  - `c.body(data, status:, headers:)` 生レスポンス
+  - `c.not_found` 404応答ヘルパー
+  - `req.url` フルURL
+  - `req.queries(key)` 複数値クエリ
+- **Phase 7: Built-in Middleware (10種)**
+  - CORS, Logger, BasicAuth, BearerAuth, PoweredBy
+  - PrettyJson, SecureHeaders, RequestId, ETag, BodyLimit
+  - `Homura::Middleware` モジュールとして実装
+- **Phase 8: Cookie & Helper Functions**
+  - `c.cookie(name)`, `c.set_cookie(name, value, opts)`, `c.delete_cookie(name)`
+  - `app.request(method, path, opts)` テストヘルパー
+  - `View.tag(name, attrs, &block)` HTML ビルダー
+- **Phase 9: Advanced Routing**
+  - 正規表現ルート `:date{[0-9]+}`
+  - `app.mount(path, other_app)` アプリマウント
 
-### Next（次）
-- Phase 5: 本番デプロイ
-  - D1マイグレーション（リモート）
-  - Cloudflare Workers デプロイ
-  - E2E テスト・スクリーンショット検証
+- **Phase 10: Context API 仕上げ**
+  - `c.new_response(body, status, headers)` 任意レスポンス生成
+  - `c.render(content)` + `c.set_renderer(&block)` レイアウト
+  - `c.header(name, value, append: true)` ヘッダ追記モード
+- **Phase 11: Request API 仕上げ**
+  - `req.parse_body` URLエンコードフォームデータパース
+  - `req.valid(target)` + `req.add_validated_data` バリデーション連携
+  - `req.route_path` マッチしたルートパターン取得
+- **Phase 12: HTTPException クラス**
+  - `raise HTTPException.new(401, message: "...")` パターン
+  - `get_response` カスタムレスポンス生成
+  - `on_error` 自動連携
+- **Phase 13: 残りのミドルウェア**
+  - CSRF (origin検証)
+  - IP Restriction (deny/allow list)
+  - Timing (Server-Timing header + startTime/endTime/setMetric)
+- **Phase 14: Hono API 名前互換**
+  - `app.fetch`, `app.notFound`, `app.onError` エイリアス
+  - strict mode (trailing slash区別, default: true)
+- **Phase 15: Deploy**
+  - Cloudflare Workers デプロイ完了
+  - URL: https://homura.kazu-san.workers.dev
+
+### Now（現在）
+- **Phase 15 完了！** 全63テスト、186アサーション、0 failures
+- Hono完全互換APIサーフェスの実装 + デプロイ完了
+- 本番URL: https://homura.kazu-san.workers.dev
 
 ## Resolved questions（解決済み）
 - **mruby と JS 間の受け渡し**: MessagePack経由（homura_handle_request）
