@@ -1347,6 +1347,18 @@ interface Env {
 let mruby: MRuby | null = null;
 let coreLoaded = false;
 
+// Mutex to serialize access to the mruby WASM instance.
+// Without this, concurrent requests interleave at await points (D1 ops),
+// corrupting shared WASM memory buffers → "memory access out of bounds".
+let mrubyLock: Promise<void> = Promise.resolve();
+function withMrubyLock<T>(fn: () => Promise<T>): Promise<T> {
+  let release: () => void;
+  const next = new Promise<void>((resolve) => { release = resolve; });
+  const wait = mrubyLock;
+  mrubyLock = next;
+  return wait.then(fn).finally(() => release!());
+}
+
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -1374,8 +1386,16 @@ export default {
 
     console.info(JSON.stringify(requestLogBase));
 
+    // Read body and prefetch KV BEFORE acquiring the lock (these don't touch WASM)
+    const method = request.method;
+    let bodyStr = '';
+    if (['POST', 'PUT', 'PATCH'].includes(method)) {
+      bodyStr = await request.text();
+    }
+    const kvData = await prefetchKvData(env, url.pathname);
+
     try {
-      const method = request.method;
+      return await withMrubyLock(async () => {
       // Initialize mruby VM
       if (!mruby) {
         mruby = new MRuby();
@@ -1389,25 +1409,17 @@ export default {
         if (coreError) {
           console.error('[homura] Failed to load core:', coreError);
           mruby = null;
-          return new Response('Framework initialization failed', { status: 500 });
+          throw new Error('Framework initialization failed');
         }
         const routeResult = mruby.eval(USER_ROUTES);
         const routeError = mruby.parseEvalFailure(routeResult);
         if (routeError) {
           console.error('[homura] Failed to load routes:', routeError);
           mruby = null;
-          return new Response('Route loading failed', { status: 500 });
+          throw new Error('Route loading failed');
         }
         coreLoaded = true;
       }
-
-      // Read request body for write methods
-      let bodyStr = '';
-      if (['POST', 'PUT', 'PATCH'].includes(method)) {
-        bodyStr = await request.text();
-      }
-
-      const kvData = await prefetchKvData(env, url.pathname);
 
       // Build env as structured data (NO string interpolation / eval)
       const rubyEnv: RubyRequestEnvelope = {
@@ -1525,6 +1537,7 @@ export default {
         failure_reasons: totalFailures,
       }));
       return response;
+      }); // end withMrubyLock
 
     } catch (error) {
       console.error(JSON.stringify({
