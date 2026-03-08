@@ -809,6 +809,17 @@ int homura_handle_request(int input_len) {
 }
 
 /**
+ * Run a full GC cycle to reclaim memory between requests.
+ * Prevents arena/heap growth in the long-lived VM.
+ */
+WASM_EXPORT
+void homura_gc(void) {
+    if (mrb != NULL) {
+        mrb_full_gc(mrb);
+    }
+}
+
+/**
  * Close the mruby VM
  */
 WASM_EXPORT

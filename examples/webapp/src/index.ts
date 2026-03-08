@@ -1328,6 +1328,16 @@ class MRuby {
     }
   }
 
+  /** Run a full GC cycle to reclaim mruby heap between requests. */
+  gc(): void {
+    if (this.instance) {
+      const exports = this.instance.exports as any;
+      if (typeof exports.homura_gc === 'function') {
+        exports.homura_gc();
+      }
+    }
+  }
+
   close(): void {
     if (this.instance) {
       const exports = this.instance.exports as any;
@@ -1446,7 +1456,17 @@ export default {
       const totalFailures: string[] = [];
 
       while (true) {
-        const rawResult = mruby.handleRequest(requestEnvelope);
+        let rawResult: RubyResponse;
+        try {
+          rawResult = mruby.handleRequest(requestEnvelope);
+        } catch (wasmError) {
+          // WASM memory corruption → destroy instance so next request gets a fresh one
+          console.error('[homura] WASM error, resetting mruby instance:', wasmError);
+          try { mruby.close(); } catch (_) { /* ignore close errors */ }
+          mruby = null;
+          coreLoaded = false;
+          throw wasmError;
+        }
         currentResult = validateRubyResponse(rawResult);
         const loopOps = await executeLoopOps(env, currentResult);
         const summary = summarizeLoopResults(loopOps);
@@ -1536,6 +1556,10 @@ export default {
         total_loop_ms: totalLoopMs,
         failure_reasons: totalFailures,
       }));
+
+      // Reclaim mruby heap after each request to prevent memory growth
+      mruby.gc();
+
       return response;
       }); // end withMrubyLock
 
