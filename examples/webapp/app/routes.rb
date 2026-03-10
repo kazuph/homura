@@ -327,4 +327,41 @@ $app.delete "/kv/users/:name" do |c|
   c.json({ deleted: name })
 end
 
+# ===== Admin (Basic Auth) =====
+
+$admin_auth = Homura::Middleware.basic_auth(username: "admin", password: "admin", realm: "Admin Area")
+
+# /admin 以下の全ルートに Basic Auth を適用
+$app.use do |ctx, nxt|
+  if ctx.req.path.start_with?("/admin")
+    $admin_auth.call(ctx, nxt)
+  else
+    nxt.call
+  end
+end
+
+$app.get "/admin" do |c|
+  c.html(
+    "<h1>Admin Dashboard</h1>" \
+    "<p>Welcome, authenticated user!</p>" \
+    "<ul>" \
+    "<li><a href='/'>Back to Home</a></li>" \
+    "<li><a href='/api'>API</a></li>" \
+    "<li><a href='/health'>Health Check</a></li>" \
+    "</ul>" \
+    "<p><small>Protected by Homura::Middleware.basic_auth</small></p>"
+  )
+end
+
+$app.get "/admin/stats" do |c|
+  todos = c.db.all("SELECT COUNT(*) AS total, SUM(CASE WHEN completed = 1 THEN 1 ELSE 0 END) AS done FROM todos")
+  row = todos.is_a?(Array) && todos[0] ? todos[0] : {}
+  c.json({
+    total_todos: row["total"] || row[:total] || 0,
+    completed_todos: row["done"] || row[:done] || 0,
+    runtime: "mruby + WASI",
+    auth: "basic_auth (admin/admin)"
+  })
+end
+
 # Note: CSS is served directly from TypeScript (see index.ts)
