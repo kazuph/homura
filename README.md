@@ -1,59 +1,36 @@
-# Homura 🔥
+# Homura
 
 > A Ruby DSL web framework for Cloudflare Workers, powered by mruby + WASI
 
-Homura (炎 - flame) brings the expressiveness of Ruby to edge computing. Write your routing logic in Ruby, deploy to Cloudflare Workers.
+Homura brings the expressiveness of Ruby to edge computing. Write your routing logic in Ruby, deploy to Cloudflare Workers. The framework compiles mruby to WebAssembly (WASI target) and communicates with the JS runtime via MessagePack IPC.
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                    Cloudflare Workers                         │
-├──────────────────────────────────────────────────────────────┤
-│  ┌───────────┐    ┌──────────────┐    ┌──────────────────┐  │
-│  │  Request  │───▶│   index.ts   │───▶│    Response      │  │
-│  └───────────┘    │  (JS glue)   │    └──────────────────┘  │
-│                   └──────┬───────┘                           │
-│                     ┌────┴─────┐                             │
-│              ┌──────▼──────┐ ┌─▼──────────┐                 │
-│              │ mruby.wasm  │ │ D1 / KV    │                 │
-│              │ (MessagePack│ │ (binding adapter) │          │
-│              └──────┬──────┘ └────────────┘                 │
-│              ┌──────▼──────┐                                │
-│              │  routes.rb  │                                │
-│              │  (Ruby DSL) │                                │
-│              └─────────────┘                                │
-└──────────────────────────────────────────────────────────────┘
+Request → index.ts (JS glue) → mruby.wasm (MessagePack IPC) → routes.rb (Ruby DSL)
+                ↓                        ↓
+          D1 / KV bindings         Homura framework
+          (JS-side execution)      (routing, context, ORM)
 ```
+
+- **Ruby side** handles: routing, request parsing, business logic, ORM queries, response building
+- **JS side** handles: WASM lifecycle, D1/KV binding execution, JSX template rendering
+- Communication uses MessagePack with a continuation-loop pattern for async I/O (D1 queries trigger `ContinueRequest`, JS executes the SQL, then resumes Ruby with results)
 
 ## Quick Start
 
 ```bash
 cd examples/webapp
 npm install
-npm run dev
+npm run bundle:ruby   # Bundle lib/homura.rb + app/routes.rb into src/ruby-bundle.ts
+npm run dev            # Start wrangler dev on port 8787
 ```
 
-## Examples
+## Sinatra-Compatible DSL
 
-| Example | Description | Key Features |
-|---------|-------------|-------------|
-| [webapp](examples/webapp/) | Todo App | D1, JSX templates, CRUD |
-| [url-shortener](examples/url-shortener/) | URL Shortener | mruby-random, KV, Base62 |
-| [json-transform](examples/json-transform/) | JSON Pipeline | Enumerable, Lazy, Set |
-| [template-engine](examples/template-engine/) | Template Engine | metaprog, HTML escaping |
-| [time-tracker](examples/time-tracker/) | Time Tracker | mruby-time, pack, bigint, D1 |
-| [dsl-api](examples/dsl-api/) | DSL API Builder | Homura::Model ORM, metaprog |
+Homura's routing DSL is inspired by [Sinatra](https://sinatrarb.com/). Here's what's implemented:
 
-## Example: To-Do App
-
-The included example (`examples/webapp/`) is a full To-Do app with D1 persistence:
-
-- **Home page** (`/`) - To-Do list UI with add/toggle/delete/filter
-- **REST API** (`/api/todos`) - CRUD endpoints backed by Cloudflare D1
-- **Ruby routes** - Additional routes defined in `app/routes.rb`
-
-## Ruby DSL
+### Routing
 
 ```ruby
 $app.get "/hello/:name" do |c|
@@ -61,171 +38,407 @@ $app.get "/hello/:name" do |c|
 end
 
 $app.post "/users" do |c|
-  data = c.json_body  # Parsed JSON body
+  data = c.json_body
   c.json({ created: data }, status: 201)
 end
+```
 
-# Middleware (runs before route handlers)
+| Sinatra | Homura | Status |
+|---------|--------|--------|
+| `get '/path'` | `$app.get "/path" do \|c\| ... end` | Supported |
+| `post '/path'` | `$app.post "/path" do \|c\| ... end` | Supported |
+| `put '/path'` | `$app.put "/path" do \|c\| ... end` | Supported |
+| `patch '/path'` | `$app.patch "/path" do \|c\| ... end` | Supported |
+| `delete '/path'` | `$app.delete "/path" do \|c\| ... end` | Supported |
+| `options '/path'` | `$app.options "/path" do \|c\| ... end` | Supported |
+| Route params `'/users/:id'` | `c.params[:id]` | Supported |
+| Wildcard `'/files/*'` | `c.params[:_wildcard]` | Supported |
+| Optional params `'/users/:id?'` | Supported | Supported |
+| Regex constraints `'/users/:id{[0-9]+}'` | Supported | Supported |
+
+### Helpers
+
+```ruby
+$app.helpers do
+  def format_date(time)
+    time.strftime("%Y-%m-%d")
+  end
+end
+
+# Available in all route handlers via `c.format_date(time)`
+```
+
+| Sinatra | Homura | Status |
+|---------|--------|--------|
+| `helpers do ... end` | `$app.helpers do ... end` | Supported |
+| `helpers MyModule` | Not supported (block-only) | Partial |
+
+### Configuration
+
+```ruby
+$app.configure do |app|
+  app.set :app_name, "My App"
+  app.enable :logging
+end
+
+$app.configure :production do |app|
+  app.disable :debug
+end
+```
+
+| Sinatra | Homura | Status |
+|---------|--------|--------|
+| `configure do ... end` | `$app.configure do \|app\| ... end` | Supported |
+| `configure :production do ... end` | Environment-scoped configure | Supported |
+| `set :key, value` | `$app.set :key, value` | Supported |
+| `enable :feature` | `$app.enable :feature` | Supported |
+| `disable :feature` | `$app.disable :feature` | Supported |
+| `settings.key` | `$app.settings[:key]` | Supported |
+
+### Request Handling
+
+| Sinatra | Homura | Status |
+|---------|--------|--------|
+| `params[:name]` | `c.params[:name]` | Supported |
+| `request.body` | `c.req.text` / `c.req.json` | Supported |
+| `request.path` | `c.req.path` | Supported |
+| `request.request_method` | `c.req.method` | Supported |
+| `request.query_string` | `c.req.query` / `c.req.query(:key)` | Supported |
+| `request.url` | `c.req.url` | Supported |
+| `request.env['HTTP_X_FOO']` | `c.req.header("X-Foo")` | Supported |
+| `halt 403` | `c.halt(403)` | Supported |
+| `halt 200, 'OK'` | `c.halt(200, nil, "OK")` | Supported |
+
+### Response Helpers
+
+```ruby
+$app.get "/api/data" do |c|
+  c.json({ key: "value" })           # Content-Type: application/json
+end
+
+$app.get "/page" do |c|
+  c.html("<h1>Hello</h1>")           # Content-Type: text/html
+end
+
+$app.get "/greeting" do |c|
+  c.text("Hello, World!")            # Content-Type: text/plain
+end
+
+$app.get "/home" do |c|
+  c.jsx("home", { title: "Top" })    # JSX server-side rendering
+end
+```
+
+| Sinatra | Homura | Status |
+|---------|--------|--------|
+| `content_type :json; body data.to_json` | `c.json(data)` | Supported |
+| `erb :template` | `c.jsx("template", props)` | Supported (JSX instead of ERB) |
+| `redirect '/path'` | `c.redirect("/path")` | Supported |
+| `status 201` | `c.status(201)` | Supported |
+| `headers "X-Custom" => "value"` | `c.header("X-Custom", "value")` | Supported |
+| `cookies[:name]` | `c.cookie("name")` | Supported |
+| `response.set_cookie` | `c.set_cookie(name, value, opts)` | Supported |
+| `session[:key]` | `c.session[:key]` (cookie-based) | Supported |
+
+### Middleware
+
+```ruby
+# Global middleware (runs on all routes)
 $app.use do |ctx, nxt|
-  # Add custom logic before/after route handling
+  ctx.header("X-Powered-By", "Homura")
+  nxt.call
+end
+
+# Route-scoped middleware
+$app.use "/admin" do |ctx, nxt|
+  # Auth check for /admin routes only
   nxt.call
 end
 ```
 
-## Features
+| Sinatra | Homura | Status |
+|---------|--------|--------|
+| `before do ... end` | `$app.use do \|ctx, nxt\| ... end` | Supported (Hono-style) |
+| `after do ... end` | `$app.after do ... end` | Supported |
+| Route-scoped middleware | `$app.use "/path" do ... end` | Supported |
 
-- **Ruby DSL**: Sinatra/Hono-like routing (`get`, `post`, `put`, `patch`, `delete`)
-- **Middleware chain**: `use` with `next` pattern for composable request pipeline
-- **MessagePack IPC**: Secure request handling (no eval injection)
-- **D1 Database**: Cloudflare D1 (SQLite) for persistence
-- **KV Storage**: Cloudflare KV for key-value operations
-- **JSX Templates**: TypeScript/JSX server-side rendering
-- **Edge-native**: Optimized for Cloudflare Workers
-- **Lightweight**: mruby core (~790KB wasm)
+### Error Handling
+
+```ruby
+$app.not_found do |c|
+  c.json({ error: "Not found" }, status: 404)
+end
+
+$app.on_error do |e, c|
+  c.json({ error: e.message }, status: 500)
+end
+```
+
+| Sinatra | Homura | Status |
+|---------|--------|--------|
+| `not_found do ... end` | `$app.not_found do ... end` | Supported |
+| `error do ... end` | `$app.on_error do ... end` | Supported |
+| `error 404 do ... end` | Not supported (use `not_found`) | Not yet |
+
+### Not Yet Supported
+
+| Sinatra Feature | Status |
+|----------------|--------|
+| `before '/path' do ... end` (filter syntax) | Use `$app.use "/path"` instead |
+| Named routes (`url(:name)`) | Not yet |
+| Streaming responses | Not yet |
+| WebSocket | Not yet |
+| File uploads / multipart | Not yet |
+| `error 404 do` (status-specific error blocks) | Not yet |
+| Template engines (ERB, Haml, Slim) | JSX only |
+| Class-based app (`class MyApp < Sinatra::Base`) | Global `$app` only |
+
+## Homura::Model (ActiveRecord-Style ORM)
+
+`Homura::Model` provides an ActiveRecord-inspired ORM for Cloudflare D1 (SQLite). It's defined in `lib/homura_model.rb`.
+
+### Model Definition
+
+```ruby
+class Article < Homura::Model
+  table :articles
+
+  column :id,        :integer
+  column :title,     :string
+  column :body,      :string
+  column :author,    :string
+  column :published, :boolean
+
+  validates :title, presence: true
+  validates :author, presence: true
+end
+```
+
+### Query Interface
+
+```ruby
+# Find by ID
+article = Article.find(c.db, 1)
+
+# Where conditions (Hash only - no raw SQL for security)
+articles = Article.where(author: "Alice").all(c.db)
+
+# Chaining: where + order + limit + offset
+articles = Article.where(published: true)
+                  .order("created_at DESC")
+                  .limit(10)
+                  .offset(20)
+                  .all(c.db)
+
+# Count
+count = Article.where(published: true).count(c.db)
+
+# First record
+article = Article.where(title: "Hello").first(c.db)
+```
+
+| ActiveRecord | Homura::Model | Status |
+|-------------|---------------|--------|
+| `Article.find(1)` | `Article.find(c.db, 1)` | Supported |
+| `Article.where(key: val)` | `Article.where(key: val)` | Supported (Hash only) |
+| `Article.where("sql")` | Not supported (security) | Intentionally omitted |
+| `.order("col DESC")` | `.order("col DESC")` | Supported |
+| `.limit(10)` | `.limit(10)` | Supported |
+| `.offset(20)` | `.offset(20)` | Supported |
+| `.all` | `.all(c.db)` | Supported (requires db arg) |
+| `.first` | `.first(c.db)` | Supported |
+| `.count` | `.count(c.db)` | Supported |
+
+### CRUD Operations
+
+```ruby
+# Create
+article = Article.create(c.db, title: "Hello", author: "Alice")
+
+# Read
+article = Article.find(c.db, 1)
+article.title  #=> "Hello"
+
+# Update
+article.update_attrs(c.db, title: "Updated Title")
+# or
+article.title = "Updated Title"
+article.save(c.db)
+
+# Delete
+article.destroy(c.db)
+```
+
+| ActiveRecord | Homura::Model | Status |
+|-------------|---------------|--------|
+| `Model.create(attrs)` | `Model.create(c.db, attrs)` | Supported |
+| `record.save` | `record.save(c.db)` | Supported |
+| `record.update(attrs)` | `record.update_attrs(c.db, attrs)` | Supported |
+| `record.destroy` | `record.destroy(c.db)` | Supported |
+| `record.valid?` | `record.valid?` | Supported |
+| `record.errors` | `record.errors` (array of strings) | Supported |
+| `record.persisted?` | `record.persisted?` | Supported |
+| `record.to_h` | `record.to_h` | Supported |
+| `record.attribute = val` | `record.attribute = val` (via method_missing) | Supported |
+
+### Validations
+
+```ruby
+class Article < Homura::Model
+  validates :title, presence: true
+  validates :author, presence: true
+end
+
+article = Article.new(title: "", author: "Alice")
+article.valid?   #=> false
+article.errors   #=> ["title can't be blank"]
+```
+
+| ActiveRecord | Homura::Model | Status |
+|-------------|---------------|--------|
+| `validates :field, presence: true` | Supported | Supported |
+| `validates :field, uniqueness: true` | Not yet | Not yet |
+| `validates :field, format: { with: /regex/ }` | Not yet | Not yet |
+| `validates :field, length: { max: 100 }` | Not yet | Not yet |
+| Custom validations | Not yet | Not yet |
+
+### Type Casting
+
+The ORM automatically casts column values based on declared types:
+
+| Column Type | Ruby Type | DB Storage |
+|------------|-----------|------------|
+| `:integer` | `Integer` | INTEGER |
+| `:boolean` | `true/false` | INTEGER (0/1) |
+| `:string` | `String` | TEXT |
+
+### Design Decisions
+
+- **`c.db` required**: Unlike ActiveRecord's global connection, Homura passes the D1 database handle explicitly. This is because Cloudflare Workers' D1 is request-scoped.
+- **No raw SQL in `where()`**: `where("1=1; DROP TABLE x")` is intentionally rejected. Only Hash conditions are accepted to prevent SQL injection.
+- **No associations**: `has_many`, `belongs_to` are not implemented. Use explicit queries.
+- **No migrations**: Use D1's native SQL migration files (`migrations/*.sql`).
+- **No callbacks**: `before_save`, `after_create` etc. are not implemented.
+
+## Cloudflare Bindings
+
+### D1 (SQLite Database)
+
+```ruby
+# Via ORM
+articles = Article.where(published: true).all(c.db)
+
+# Direct SQL (low-level)
+result = c.db.all("SELECT * FROM articles WHERE published = ?", [1])
+row = c.db.get("SELECT * FROM articles WHERE id = ?", [1])
+c.db.run("INSERT INTO articles (title) VALUES (?)", ["Hello"])
+```
+
+### KV (Key-Value Storage)
+
+```ruby
+value = c.kv_get("my-key")
+c.kv_put("my-key", "my-value")
+c.kv_delete("my-key")
+```
+
+## mrbgems
+
+The WASI build includes 30 mrbgems. 17 were added in this release:
+
+| Gem | Category | What It Enables |
+|-----|----------|----------------|
+| `mruby-time` | Standard lib | `Time.now`, timestamps, time arithmetic |
+| `mruby-random` | Standard lib | `Random.new`, `rand()`, secure random generation |
+| `mruby-pack` | Standard lib | `Array#pack`, `String#unpack` - binary encoding/decoding |
+| `mruby-eval` | Metaprogramming | `eval`, `instance_eval`, `module_eval` |
+| `mruby-metaprog` | Metaprogramming | `define_method`, `define_singleton_method`, `send`, `respond_to?` |
+| `mruby-binding` | Metaprogramming | `Binding` objects for closures |
+| `mruby-enumerator` | Collections | `Enumerator`, `each_with_object`, `map`, `select` |
+| `mruby-enum-lazy` | Collections | `Lazy` enumerators for memory-efficient pipelines |
+| `mruby-set` | Collections | `Set` class for unique collections |
+| `mruby-data` | Data types | Immutable value objects (`Data.define`) |
+| `mruby-bigint` | Numeric | Arbitrary-precision integers |
+| `mruby-rational` | Numeric | Rational number arithmetic |
+| `mruby-fiber` | Concurrency | Fiber-based coroutines |
+| `mruby-enum-chain` | Collections | `Enumerator::Chain` for chaining enumerators |
+| `mruby-catch` | Control flow | `catch`/`throw` for non-local jumps |
+| `mruby-compar-ext` | Core ext | `Comparable#clamp` |
+| `mruby-numeric-ext` | Core ext | Extended numeric methods |
+
+Previously included (13 gems): `mruby-sprintf`, `mruby-math`, `mruby-struct`, `mruby-enum-ext`, `mruby-string-ext`, `mruby-array-ext`, `mruby-hash-ext`, `mruby-range-ext`, `mruby-proc-ext`, `mruby-symbol-ext`, `mruby-object-ext`, `mruby-kernel-ext`, `mruby-class-ext`, `mruby-method`, `mruby-error`, `mruby-compiler`.
+
+## Examples
+
+Each example demonstrates specific mrbgems and framework features:
+
+| Example | Description | Key mrbgems / Features |
+|---------|-------------|----------------------|
+| [webapp](examples/webapp/) | Todo App with full CRUD | D1, JSX templates, per-request VM lifecycle |
+| [url-shortener](examples/url-shortener/) | Base62 URL shortening with click tracking | mruby-random, mruby-pack, KV storage |
+| [json-transform](examples/json-transform/) | JSON data pipeline (filter, map, group, dedupe) | mruby-enumerator, mruby-enum-lazy, mruby-set |
+| [template-engine](examples/template-engine/) | Variable interpolation + HTML escaping | mruby-metaprog (define_singleton_method) |
+| [time-tracker](examples/time-tracker/) | Event logging with time-windowed stats | mruby-time, mruby-pack, mruby-bigint, D1 |
+| [dsl-api](examples/dsl-api/) | DSL-driven auto CRUD generation | Homura::Model ORM, mruby-metaprog, D1 |
+
+### Running an example
+
+```bash
+cd examples/<name>
+npm install
+npm run bundle:ruby   # Bundles lib/homura.rb + app/routes.rb
+npm run dev            # Starts wrangler dev server
+```
+
+### Running E2E tests
+
+```bash
+# From repository root
+cd e2e
+npm install
+BASE_URL=http://127.0.0.1:<port> npx playwright test <example>.spec.ts
+```
 
 ## Development
 
 ### Prerequisites
 
-1. **wasi-sdk** (for building mruby to WASM):
-   ```bash
-   # Install to ~/.local/wasi-sdk
-   ```
-
-2. **wrangler** (Cloudflare Workers CLI):
-   ```bash
-   npm install -g wrangler
-   ```
+- [wasi-sdk](https://github.com/WebAssembly/wasi-sdk) (for building mruby to WASM)
+- [wrangler](https://developers.cloudflare.com/workers/wrangler/) (Cloudflare Workers CLI)
 
 ### Building mruby.wasm
 
 ```bash
 cd mruby
-make setup    # Clone mruby source
+make setup    # Clone mruby 3.3.0 source
 make          # Build mruby.wasm (~790KB)
 ```
 
-### Running locally
-
-```bash
-cd examples/webapp
-npm install
-npm run dev   # Starts wrangler dev on port 8787
-```
-
-### テスト
-
-```bash
-cd examples/webapp
-npm test  # Node test (.js)
-
-cd ../.. # repository root
-ruby -I. test/homura_core_test.rb
-```
-
-テスト項目は `test/homura_core_test.rb` と `examples/webapp/tests/integration-security-notes.md` を参照してください。
-
-### Ruby-first 開発フロー（必読）
-
-Homuraでは `/api/*` を含むアプリ挙動は原則すべて `examples/webapp/app/routes.rb` で定義します。  
-TypeScript 側 (`examples/webapp/src/index.ts`) は以下だけを担当します。
-
-- WASM初期化（mruby）
-- MessagePack で `RubyRequestEnvelope` / `RubyResponse` を受け渡す
-- ルート外処理（Cloudflareバインディング実行）
-  - `kv_ops` の実行
-  - `d1_ops` の実行
-  - 継続実行ループ制御
-
-Rubyのみで追加開発する場合は、基本的に以下だけ更新すれば済みます。
-
-1. `examples/webapp/app/routes.rb` へのルート追加/更新
-2. `examples/webapp/migrations/*.sql` の必要なDDL変更
-3. `examples/webapp/src/templates.tsx` の表示整備（任意）
-
-### Deploying
-
-```bash
-cd examples/webapp
-# Apply D1 migrations first
-npx wrangler d1 migrations apply homura-db --remote
-npx wrangler deploy
-```
-
-## Project Structure
+### Project Structure
 
 ```
 homura/
 ├── lib/
-│   └── homura.rb           # Framework core (routing, context, middleware)
+│   ├── homura.rb           # Framework core (routing, context, middleware, Sinatra-compat)
+│   └── homura_model.rb     # Homura::Model ORM
 ├── mruby/
-│   ├── Makefile             # WASI build script
-│   ├── build_config.rb      # mruby cross-compile config
-│   ├── src/
-│   │   └── homura_entry.c   # C API (init, eval, handle_request via MessagePack)
-│   └── build/
-│       └── mruby.wasm       # Compiled output
+│   ├── build_config.rb     # 30 mrbgems for WASI build
+│   └── src/homura_entry.c  # C API (MessagePack IPC)
 ├── examples/
-│   └── webapp/
-│       ├── src/
-│       │   ├── index.ts       # Worker entry + MessagePack bridge + binding execution
-│       │   ├── templates.tsx   # JSX templates (To-Do app UI)
-│       │   ├── ruby-bundle.ts  # Bundled Ruby code (auto-generated)
-│       │   ├── styles-bundle.ts # Bundled CSS (auto-generated)
-│       │   └── lib/
-│       │       ├── jsx-runtime.ts  # Custom JSX factory
-│       │       └── render.ts       # renderToString implementation
-│       ├── app/
-│       │   ├── routes.rb      # User-defined Ruby routes
-│       │   └── styles.css     # Application CSS
-│       ├── migrations/
-│       │   └── 0001_create_todos.sql  # D1 schema
-│       ├── wrangler.toml      # Cloudflare config (D1, KV bindings)
-│       └── package.json
-└── README.md
+│   ├── webapp/             # Todo app (D1 + JSX)
+│   ├── url-shortener/      # Base62 + KV
+│   ├── json-transform/     # Enumerable pipeline
+│   ├── template-engine/    # Metaprogramming template
+│   ├── time-tracker/       # Time + bigint + D1
+│   └── dsl-api/            # ORM auto-CRUD
+└── e2e/                    # Playwright E2E tests
 ```
-
-## Roadmap
-
-- [x] mruby WASI integration
-- [x] MessagePack request handling (security)
-- [x] Path parameter extraction
-- [x] KV storage operations
-- [x] D1 database integration (To-Do CRUD)
-- [x] JSX template engine
-- [x] Middleware system (`use`/`next`)
-- [x] JSON body parsing (`json_body`)
-- [x] Query string parsing
-
-## Rubyファースト運用ガイドライン
-
-- `/api/*` や `"/"` ルートは Ruby ルート定義のみで変更する
-- TS 側は API 仕様変更を直接持たず、リクエスト契約(`RubyRequestEnvelope`)の整合だけ管理する
-- ルーティング、バリデーション、レスポンス整形の基本原則は Ruby 側で実装する
-- D1/KV の追加処理（`db`/`kv_put`/`kv_delete`）も Ruby の抽象 API から呼び出す
-
-## Migration運用規約
-
-- `examples/webapp/migrations/*.sql` は本番とローカルで同内容を共有し、都度履歴を追跡する
-- ローカル適用:
-  - `cd examples/webapp`
-  - `npx wrangler d1 migrations apply homura-db --local`
-- リモート適用:
-  - `npx wrangler d1 migrations apply homura-db --remote`
-- CI/CDでは deploy 前に `wrangler d1 migrations list homura-db` で適用状態を確認する
-
-## Ruby移植版の受け入れ基準
-
-- `/api/*` の主要経路の実装責務が Ruby で完結していること（TS側ルーティング実装が残らない）
-- `d1_ops` / `kv_ops` は MessagePack 契約を通じてのみ実行され、外部副作用が Ruby ルートから見える形で管理されていること
-- 主要機能追加時、`app/routes.rb` の変更だけで要件を満たせること（`index.ts`の編集を最小化）
-- [ ] Session/cookie helpers
-- [ ] WebSocket support
 
 ## Inspiration
 
 - [Hono](https://hono.dev/) - Ultrafast web framework for the Edge
-- [Sinatra](https://sinatrarb.com/) - DSL for quickly creating web applications
+- [Sinatra](https://sinatrarb.com/) - DSL for quickly creating web applications in Ruby
+- [ActiveRecord](https://guides.rubyonrails.org/active_record_basics.html) - ORM pattern for Ruby
 - [mruby](https://mruby.org/) - Lightweight implementation of Ruby
 
 ## License
