@@ -39,6 +39,7 @@ const Layout = ({
           </a>
           <nav className="nav">
             <a href="/api">API</a>
+            <a href="/admin">Admin</a>
             <a href="https://github.com/kazuph/homura" target="_blank" rel="noopener noreferrer">GitHub</a>
           </nav>
         </div>
