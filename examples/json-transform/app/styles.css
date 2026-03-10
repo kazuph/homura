@@ -1,0 +1,90 @@
+:root {
+  color-scheme: light;
+  --bg: #f5f0e7;
+  --text: #221c17;
+  --muted: #6d6256;
+  --card: #fffdf8;
+  --line: rgba(34, 28, 23, 0.12);
+  --accent: #b6542c;
+  --accent-2: #2a6f78;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Hiragino Sans", "Noto Sans JP", sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(42, 111, 120, 0.14), transparent 28%),
+    linear-gradient(180deg, #f8f4ec 0%, #eee4d4 100%);
+}
+
+.container { max-width: 1120px; margin: 0 auto; padding: 32px 20px 56px; }
+.hero { padding: 16px 0 24px; }
+.eyebrow { margin: 0 0 8px; text-transform: uppercase; letter-spacing: 0.12em; font-size: 12px; color: var(--muted); }
+.hero h1 { margin: 0 0 12px; font-size: 40px; }
+.lead { margin: 0; max-width: 720px; color: var(--muted); line-height: 1.6; }
+
+.grid { display: grid; gap: 20px; }
+.grid.two-up { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  padding: 20px;
+  box-shadow: 0 18px 48px rgba(34, 28, 23, 0.08);
+}
+.stack { display: flex; flex-direction: column; gap: 16px; }
+.stack-tight { display: flex; flex-direction: column; gap: 12px; }
+.row { display: flex; gap: 12px; flex-wrap: wrap; }
+.row > * { flex: 1 1 160px; }
+
+.text-input,
+.code-input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px 14px;
+  font: inherit;
+  color: var(--text);
+  background: #fff;
+}
+
+.code-input,
+.code-output {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.code-output {
+  min-height: 240px;
+  margin: 0;
+  border-radius: 16px;
+  padding: 16px;
+  overflow: auto;
+  background: #171311;
+  color: #f7efe5;
+}
+
+.actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.button {
+  border: none;
+  border-radius: 999px;
+  padding: 11px 18px;
+  font: inherit;
+  font-weight: 700;
+  color: #fff;
+  background: var(--accent);
+  cursor: pointer;
+}
+.button.secondary { background: var(--accent-2); }
+.button.accent { background: #171311; }
+.status { margin: 0; min-height: 22px; color: var(--muted); }
+.status.error { color: #9b2c2c; }
+
+@media (max-width: 720px) {
+  .hero h1 { font-size: 32px; }
+  .container { padding-left: 16px; padding-right: 16px; }
+}

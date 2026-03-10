@@ -63,6 +63,21 @@ const Home = ({ todos }: TemplateLocals) => (
       </p>
     </section>
 
+    <section className="grid">
+      <div className="card">
+        <h3>何ができる?</h3>
+        <p>To-Do の追加、完了切り替え、削除をその場で操作できるシンプルなタスク管理アプリです。</p>
+      </div>
+      <div className="card">
+        <h3>何がすごい?</h3>
+        <p>Ruby が WebAssembly 化された mruby として Cloudflare のエッジで動き、JSX テンプレートと D1 まで Ruby DSL でつながっています。</p>
+      </div>
+      <div className="card">
+        <h3>Powered by</h3>
+        <p><code>mruby-set</code> / <code>mruby-enumerator</code> / D1 SQLite / Homura Ruby DSL</p>
+      </div>
+    </section>
+
     <section className="todo-section">
       <div className="todo-card">
         <div className="todo-input-row">

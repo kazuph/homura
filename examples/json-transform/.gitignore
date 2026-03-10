@@ -1,0 +1,6 @@
+node_modules/
+
+# Auto-generated files (copied from framework during build)
+src/lib/
+src/ruby-bundle.ts
+src/styles-bundle.ts

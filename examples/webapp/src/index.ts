@@ -10,7 +10,7 @@
 import mrubyWasm from '../../../mruby/build/mruby.wasm';
 import { renderTemplate } from './templates.tsx';
 import { APP_CSS } from './styles-bundle';
-import { HOMURA_CORE, USER_ROUTES } from './ruby-bundle';
+import { HOMURA_CORE, HOMURA_MODEL, USER_ROUTES } from './ruby-bundle';
 
 // Homura MessagePack v2 contract: request/response/control are
 // transported as a single typed envelope and all app routing is in Ruby.
@@ -1354,8 +1354,36 @@ interface Env {
   HOMURA_DB?: D1Database;
 }
 
-let mruby: MRuby | null = null;
-let coreLoaded = false;
+async function createInitializedMruby(): Promise<MRuby> {
+  const runtime = new MRuby();
+  await runtime.init();
+
+  const coreResult = runtime.eval(HOMURA_CORE);
+  const coreError = runtime.parseEvalFailure(coreResult);
+  if (coreError) {
+    console.error('[homura] Failed to load core:', coreError);
+    runtime.close();
+    throw new Error('Framework initialization failed');
+  }
+
+  const modelResult = runtime.eval(HOMURA_MODEL);
+  const modelError = runtime.parseEvalFailure(modelResult);
+  if (modelError) {
+    console.error('[homura] Failed to load model layer:', modelError);
+    runtime.close();
+    throw new Error('Model loading failed');
+  }
+
+  const routeResult = runtime.eval(USER_ROUTES);
+  const routeError = runtime.parseEvalFailure(routeResult);
+  if (routeError) {
+    console.error('[homura] Failed to load routes:', routeError);
+    runtime.close();
+    throw new Error('Route loading failed');
+  }
+
+  return runtime;
+}
 
 // Mutex to serialize access to the mruby WASM instance.
 // Without this, concurrent requests interleave at await points (D1 ops),
@@ -1406,31 +1434,8 @@ export default {
 
     try {
       return await withMrubyLock(async () => {
-      // Initialize mruby VM
-      if (!mruby) {
-        mruby = new MRuby();
-        await mruby.init();
-      }
-
-      // Load framework core and user routes (trusted code, eval is safe here)
-      if (!coreLoaded) {
-        const coreResult = mruby.eval(HOMURA_CORE);
-        const coreError = mruby.parseEvalFailure(coreResult);
-        if (coreError) {
-          console.error('[homura] Failed to load core:', coreError);
-          mruby = null;
-          throw new Error('Framework initialization failed');
-        }
-        const routeResult = mruby.eval(USER_ROUTES);
-        const routeError = mruby.parseEvalFailure(routeResult);
-        if (routeError) {
-          console.error('[homura] Failed to load routes:', routeError);
-          mruby = null;
-          throw new Error('Route loading failed');
-        }
-        coreLoaded = true;
-      }
-
+      const runtime = await createInitializedMruby();
+      try {
       // Build env as structured data (NO string interpolation / eval)
       const rubyEnv: RubyRequestEnvelope = {
         v: HOMURA_MSGPACK_VERSION,
@@ -1458,13 +1463,9 @@ export default {
       while (true) {
         let rawResult: RubyResponse;
         try {
-          rawResult = mruby.handleRequest(requestEnvelope);
+          rawResult = runtime.handleRequest(requestEnvelope);
         } catch (wasmError) {
-          // WASM memory corruption → destroy instance so next request gets a fresh one
-          console.error('[homura] WASM error, resetting mruby instance:', wasmError);
-          try { mruby.close(); } catch (_) { /* ignore close errors */ }
-          mruby = null;
-          coreLoaded = false;
+          console.error('[homura] WASM error during request:', wasmError);
           throw wasmError;
         }
         currentResult = validateRubyResponse(rawResult);
@@ -1557,10 +1558,16 @@ export default {
         failure_reasons: totalFailures,
       }));
 
-      // Reclaim mruby heap after each request to prevent memory growth
-      mruby.gc();
+      runtime.gc();
 
       return response;
+      } finally {
+        try {
+          runtime.close();
+        } catch (closeError) {
+          console.warn('[homura] Failed to close mruby runtime:', closeError);
+        }
+      }
       }); // end withMrubyLock
 
     } catch (error) {

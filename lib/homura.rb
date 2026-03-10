@@ -2049,4 +2049,124 @@ def parse_json(str)
   value
 end
 
+class Homura
+  attr_reader :settings
+
+  unless method_defined?(:__phase_a_initialize_with_settings)
+    alias __phase_a_initialize_with_settings initialize
+
+  def initialize(opts = {})
+    __phase_a_initialize_with_settings(opts)
+    @settings = {}
+    @settings[:environment] = opts[:environment] || opts["environment"] || "development"
+  end
+  end
+
+  def helpers(&block)
+    return unless block_given?
+    @helper_modules ||= []
+    helper_module = Module.new
+    helper_module.module_eval(&block)
+    @helper_modules << helper_module
+    ::Context.send(:include, helper_module)
+  end
+
+  def set(key, value = nil)
+    settings[key.to_sym] = value
+    value
+  end
+
+  def enable(key)
+    set(key, true)
+  end
+
+  def disable(key)
+    set(key, false)
+  end
+
+  def configure(*envs, &block)
+    return unless block_given?
+    if envs.empty?
+      block.call(self)
+    else
+      current = @settings[:environment] || "development"
+      block.call(self) if envs.map(&:to_s).include?(current.to_s)
+    end
+  end
+end
+
+class Context
+  def halt(status_or_body = nil, headers_or_body = nil, body = nil)
+    if status_or_body.is_a?(Integer)
+      raise HTTPException.new(status_or_body, message: body || headers_or_body || "")
+    else
+      raise HTTPException.new(200, message: status_or_body.to_s)
+    end
+  end
+
+  def session
+    @session_data ||= begin
+      raw = cookie("homura_session")
+      if !raw
+        {}
+      else
+        decoded = Homura::Middleware.base64_decode(raw)
+        if decoded
+          parse_session_data(decoded.to_s)
+        else
+          {}
+        end
+      end
+    end
+  end
+
+  def save_session
+    return if @session_data.nil? || @session_data.empty?
+    encoded = Homura::Middleware.base64_encode(session_to_string(@session_data))
+    set_cookie("homura_session", encoded, path: "/", http_only: true)
+  end
+
+  private
+
+  def parse_session_data(payload)
+    result = {}
+    return result if payload.nil? || payload.empty?
+
+    payload.to_s.split("&").each do |pair|
+      next if pair.empty?
+      name, value = pair.split("=", 2)
+      next if name.nil?
+      key = session_decode(name)
+      result[key] = session_decode(value || "")
+    end
+
+    result
+  end
+
+  def session_to_string(data)
+    rows = []
+    data.each do |key, value|
+      next if key.to_s.start_with?("_")
+      rows << "#{session_encode(key.to_s)}=#{session_encode(value.to_s)}"
+    end
+    rows.join("&")
+  end
+
+  def session_encode(str)
+    text = str.to_s
+    text
+      .gsub("%", "%25")
+      .gsub("&", "%26")
+      .gsub("=", "%3D")
+  end
+
+  def session_decode(str)
+    decoded = str.to_s
+    decoded = decoded.gsub("%25", "%")
+    decoded = decoded.gsub("%26", "&")
+    decoded = decoded.gsub("%3D", "=")
+    decoded
+  end
+end
+
 $app = Homura.new

@@ -266,6 +266,14 @@ $app.get "/health" do |c|
   c.json({ status: "ok", runtime: "cloudflare-workers", engine: "mruby" })
 end
 
+$app.get "/api/test-gems" do |c|
+  c.json({
+    time_now: Time.now.to_i,
+    set_values: Set.new([1, 2, 2, 3]).to_a,
+    enumerator: [1, 2, 3].map { |value| value * 2 },
+  })
+end
+
 # ===== Users CRUD =====
 
 $app.get "/users/:id" do |c|
