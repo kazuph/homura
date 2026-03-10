@@ -1,0 +1,26 @@
+name = "homura-time-tracker"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[build]
+command = "npm run bundle:ruby"
+watch_dir = ["app", "../../lib"]
+
+# Enable wasm support
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+
+# KV namespace binding (used for counter demo, etc.)
+[[kv_namespaces]]
+binding = "HOMURA_KV"
+# NOTE: These IDs are environment-specific. Replace with your own after `wrangler kv namespace create`
+id = "acd9b62f44b04336b1d16d4fdbd86326"
+preview_id = "4a4946ebb0d34ffd98b30a3a9d6f2b5e"
+
+# D1 database binding (used for Time Tracker)
+[[d1_databases]]
+binding = "HOMURA_DB"
+# NOTE: This ID is environment-specific. Replace with your own after `wrangler d1 create`
+database_name = "homura-db"
+database_id = "a633c7c8-3334-4c7c-94fe-a4ff877fda68"

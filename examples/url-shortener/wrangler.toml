@@ -1,0 +1,16 @@
+name = "homura-url-shortener"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[build]
+command = "npm run bundle:ruby"
+watch_dir = ["app", "../../lib"]
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+
+[[kv_namespaces]]
+binding = "HOMURA_KV"
+id = "placeholder-create-with-wrangler-kv-namespace-create"
+preview_id = "placeholder"

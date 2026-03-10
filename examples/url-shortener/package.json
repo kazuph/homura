@@ -1,0 +1,18 @@
+{
+  "name": "homura-url-shortener",
+  "version": "0.1.0",
+  "description": "Example URL shortener using Homura - mruby + WASI + KV",
+  "type": "module",
+  "scripts": {
+    "bundle:ruby": "node scripts/bundle-ruby.js",
+    "build:mruby": "cd ../../mruby && make",
+    "build": "npm run bundle:ruby && npm run build:mruby",
+    "dev": "npm run bundle:ruby && wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
+    "test": "node --test tests/*.js"
+  },
+  "devDependencies": {
+    "wrangler": "^3.99.0"
+  },
+  "license": "MIT"
+}

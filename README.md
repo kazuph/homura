@@ -34,6 +34,17 @@ npm install
 npm run dev
 ```
 
+## Examples
+
+| Example | Description | Key Features |
+|---------|-------------|-------------|
+| [webapp](examples/webapp/) | Todo App | D1, JSX templates, CRUD |
+| [url-shortener](examples/url-shortener/) | URL Shortener | mruby-random, KV, Base62 |
+| [json-transform](examples/json-transform/) | JSON Pipeline | Enumerable, Lazy, Set |
+| [template-engine](examples/template-engine/) | Template Engine | metaprog, HTML escaping |
+| [time-tracker](examples/time-tracker/) | Time Tracker | mruby-time, pack, bigint, D1 |
+| [dsl-api](examples/dsl-api/) | DSL API Builder | Homura::Model ORM, metaprog |
+
 ## Example: To-Do App
 
 The included example (`examples/webapp/`) is a full To-Do app with D1 persistence:
