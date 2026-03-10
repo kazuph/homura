@@ -26,6 +26,8 @@ npm run bundle:ruby   # Bundle lib/homura.rb + app/routes.rb into src/ruby-bundl
 npm run dev            # Start wrangler dev on port 8787
 ```
 
+Homuraでは `/api/*` を含むアプリ挙動は原則すべて `examples/webapp/app/routes.rb` で定義します。
+
 ## Sinatra-Compatible DSL
 
 Homura's routing DSL is inspired by [Sinatra](https://sinatrarb.com/). Here's what's implemented:
@@ -235,6 +237,10 @@ count = Article.where(published: true).count(c.db)
 
 # First record
 article = Article.where(title: "Hello").first(c.db)
+
+# Scope + enum + pluck
+titles = Article.published.order("id DESC").pluck(:title, c.db)
+Article.statuses  #=> { "draft" => 0, "published" => 1 }
 ```
 
 | ActiveRecord | Homura::Model | Status |
@@ -242,12 +248,20 @@ article = Article.where(title: "Hello").first(c.db)
 | `Article.find(1)` | `Article.find(c.db, 1)` | Supported |
 | `Article.where(key: val)` | `Article.where(key: val)` | Supported (Hash only) |
 | `Article.where("sql")` | Not supported (security) | Intentionally omitted |
+| `Article.where.not(key: val)` | `Article.where.not(key: val)` | Supported |
 | `.order("col DESC")` | `.order("col DESC")` | Supported |
 | `.limit(10)` | `.limit(10)` | Supported |
 | `.offset(20)` | `.offset(20)` | Supported |
 | `.all` | `.all(c.db)` | Supported (requires db arg) |
 | `.first` | `.first(c.db)` | Supported |
+| `.last` | `.last(c.db)` | Supported |
 | `.count` | `.count(c.db)` | Supported |
+| `.pluck(:field)` | `.pluck(:field, c.db)` | Supported |
+| `.ids` | `.ids(c.db)` | Supported |
+| `.exists?` | `.exists?(c.db)` | Supported |
+| `.find_by(...)` | `find_by(c.db, ...)` | Supported |
+| `.find_or_create_by(...)` | `find_or_create_by(c.db, ...)` | Supported |
+| `.select/.group/.having/.distinct` | Supported | Supported |
 
 ### CRUD Operations
 
@@ -287,6 +301,9 @@ article.destroy(c.db)
 class Article < Homura::Model
   validates :title, presence: true
   validates :author, presence: true
+  validates :title, length: { minimum: 3, maximum: 120 }
+  validates :published, inclusion: { in: [true, false] }
+  validate :title_must_be_clean
 end
 
 article = Article.new(title: "", author: "Alice")
@@ -297,10 +314,34 @@ article.errors   #=> ["title can't be blank"]
 | ActiveRecord | Homura::Model | Status |
 |-------------|---------------|--------|
 | `validates :field, presence: true` | Supported | Supported |
-| `validates :field, uniqueness: true` | Not yet | Not yet |
-| `validates :field, format: { with: /regex/ }` | Not yet | Not yet |
-| `validates :field, length: { max: 100 }` | Not yet | Not yet |
-| Custom validations | Not yet | Not yet |
+| `validates :field, length: {...}` | Supported | Supported |
+| `validates :field, format: { with: /regex/ }` | Supported | Supported |
+| `validates :field, inclusion/exclusion` | Supported | Supported |
+| `validates :field, numericality: {...}` | Supported | Supported |
+| Custom validations | `validate :method_name` | Supported |
+
+### Associations, Callbacks, Dirty Tracking, Scopes, Enum
+
+```ruby
+class Author < Homura::Model
+  table :authors
+  has_many :articles
+end
+
+class Article < Homura::Model
+  table :articles
+  belongs_to :author
+  scope :published, -> { where(published: true) }
+  enum :status, [:draft, :published]
+  before_save :normalize_title
+end
+```
+
+- **Associations**: `has_many`, `belongs_to`, `has_one` register metadata and load related records with `record.association(c.db)`.
+- **Callbacks**: `before/after_validation`, `before/after_save`, `before/after_create`, `before/after_update`, `before/after_destroy`.
+- **Dirty tracking**: `changed?`, `changes`, `changed_attributes`, `title_changed?`, `title_was`.
+- **Scopes**: class-level `scope :published, -> { where(published: true) }` returning chainable queries.
+- **Enum**: integer-backed mappings with getters, predicates, bang setters, and class helpers like `Article.statuses`.
 
 ### Type Casting
 
@@ -316,9 +357,10 @@ The ORM automatically casts column values based on declared types:
 
 - **`c.db` required**: Unlike ActiveRecord's global connection, Homura passes the D1 database handle explicitly. This is because Cloudflare Workers' D1 is request-scoped.
 - **No raw SQL in `where()`**: `where("1=1; DROP TABLE x")` is intentionally rejected. Only Hash conditions are accepted to prevent SQL injection.
-- **No associations**: `has_many`, `belongs_to` are not implemented. Use explicit queries.
+- **Minimal associations**: `has_many`, `belongs_to`, and `has_one` are intentionally lightweight. `through`, polymorphic, autosave, and inverse helpers are out of scope.
 - **No migrations**: Use D1's native SQL migration files (`migrations/*.sql`).
-- **No callbacks**: `before_save`, `after_create` etc. are not implemented.
+- **Minimal lifecycle hooks**: callbacks return `false` to halt and are kept intentionally simple for mruby compatibility.
+- **Explicit query safety**: query builders stay column-whitelisted and avoid raw SQL fragments in `where`.
 
 ## Cloudflare Bindings
 
