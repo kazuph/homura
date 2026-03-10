@@ -1,54 +1,1020 @@
 /**
  * Homura Example Webapp
  * Demonstrates the Homura Ruby DSL framework for Cloudflare Workers
+ *
+ * Security: Request handling uses MessagePack (homura_handle_request),
+ * NOT eval, to prevent code injection.
  */
 
 // Import the compiled mruby.wasm from the framework
 import mrubyWasm from '../../../mruby/build/mruby.wasm';
 import { renderTemplate } from './templates.tsx';
-import { HOMURA_CORE, USER_ROUTES } from './ruby-bundle';
 import { APP_CSS } from './styles-bundle';
+import { HOMURA_CORE, USER_ROUTES } from './ruby-bundle';
 
-// Longjmp exception class for wasm-sjlj
+// Homura MessagePack v2 contract: request/response/control are
+// transported as a single typed envelope and all app routing is in Ruby.
+// D1 API方針: A継続実行ループ（Rubyがd1_opsを要求し続行し、TSが実行して再投入）
+const HOMURA_MSGPACK_VERSION = 2;
+const HOMURA_LOOP_STRATEGY = 'continue-loop';
+
+const MAX_MP_SIZE = 256 * 1024;
+const MAX_MP_ARRAY = 2000;
+const MAX_MP_MAP = 512;
+const MAX_HEADER_COUNT = 200;
+const MAX_LOOP_ITERATIONS = 16;
+const MAX_OPS_PER_LOOP = 64;
+const MAX_SQL_LENGTH = 5000;
+const MAX_SQL_BIND_COUNT = 64;
+const MAX_LONGJMP_RETRIES = 64;
+const NAMED_D1_STATEMENTS: Record<string, string> = {
+  'stmt:todo_insert_returning':
+    "INSERT INTO todos (title, completed, created_at, updated_at) VALUES (?, 0, datetime('now'), datetime('now')) RETURNING id, title, completed, created_at, updated_at, completed_at",
+  'stmt:todo_update_title_returning':
+    "UPDATE todos SET title = ?, updated_at = datetime('now') WHERE id = ? RETURNING id, title, completed, created_at, updated_at, completed_at",
+  'stmt:todo_update_completed_true_returning':
+    "UPDATE todos SET completed = 1, updated_at = datetime('now'), completed_at = datetime('now') WHERE id = ? RETURNING id, title, completed, created_at, updated_at, completed_at",
+  'stmt:todo_update_completed_false_returning':
+    "UPDATE todos SET completed = 0, updated_at = datetime('now'), completed_at = NULL WHERE id = ? RETURNING id, title, completed, created_at, updated_at, completed_at",
+  'stmt:todo_update_title_completed_true_returning':
+    "UPDATE todos SET title = ?, completed = 1, updated_at = datetime('now'), completed_at = datetime('now') WHERE id = ? RETURNING id, title, completed, created_at, updated_at, completed_at",
+  'stmt:todo_update_title_completed_false_returning':
+    "UPDATE todos SET title = ?, completed = 0, updated_at = datetime('now'), completed_at = NULL WHERE id = ? RETURNING id, title, completed, created_at, updated_at, completed_at",
+  'stmt:todo_delete_returning':
+    'DELETE FROM todos WHERE id = ? RETURNING id',
+};
+const DEBUG_LONGJMP = false;
+
+interface RubyRequestEnvelope {
+  v: number;
+  request: {
+    // v2必須: method/path/body/content_type
+    method: string;
+    path: string;
+    // query は空オブジェクト可
+    query: Record<string, string>;
+    headers: Record<string, string>;
+    body: string;
+    content_type: string;
+    // 既存kvプリフェッチ（将来継続実行ループと共通化）
+    kv_data: Record<string, string>;
+  };
+  control?: {
+    // 継続実行ループ時のみ true
+    continue?: boolean;
+    // 次回再開時に実行するops
+    ops?: unknown[];
+  };
+}
+
+type KvOp = { op: 'put' | 'delete'; key: string; value?: string };
+type D1OpBase = { op: 'all' | 'first' | 'run' | 'exec' | 'get'; sql: string; binds?: unknown[] };
+type D1BatchOp = { op: 'all' | 'first' | 'run' | 'exec' | 'get'; sql: string; binds?: unknown[] };
+type D1BatchItem = { op: 'batch' | 'transaction'; statements: D1BatchOp[] };
+type D1Op = D1OpBase | D1BatchItem;
+type RubyLoopOp = (KvOp | D1Op) & { kind?: 'kv' | 'd1' };
+
+interface RubyResponse {
+  v: number;
+  // status は 100-599 の整数のみ許可
+  status: number;
+  // headers は map<string,string> のみ許可
+  headers: Record<string, string>;
+  // body は JSON互換型を許可
+  body: unknown;
+  type?: string;
+  template?: string;
+  props?: Record<string, unknown>;
+  kv_ops?: Array<{ op: string; key: string; value?: string }>;
+  d1_ops?: D1Op[];
+  control?: {
+    continue?: boolean;
+    ops?: unknown[];
+  };
+}
+
+interface LoopOpResult {
+  kind: 'kv' | 'd1';
+  op: string;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+  duration_ms?: number;
+}
+
+interface LoopExecutionSummary {
+  kind: 'kv' | 'd1';
+  status: 'ok' | 'error';
+  count: number;
+  duration_ms: number;
+  errors: string[];
+}
+
+// ─── MessagePack Encoder/Decoder ───────────────────────────────────
+
+function mpEncodeStr(parts: number[], str: string): void {
+  const bytes = new TextEncoder().encode(str);
+  const len = bytes.length;
+  if (len <= 31) {
+    parts.push(0xa0 | len);
+  } else if (len <= 0xff) {
+    parts.push(0xd9, len);
+  } else if (len <= 0xffff) {
+    parts.push(0xda, (len >> 8) & 0xff, len & 0xff);
+  } else {
+    parts.push(0xdb, (len >> 24) & 0xff, (len >> 16) & 0xff, (len >> 8) & 0xff, len & 0xff);
+  }
+  for (let i = 0; i < bytes.length; i++) parts.push(bytes[i]);
+}
+
+function mpEncodeInt(parts: number[], val: number): void {
+  if (val >= 0 && val <= 0x7f) {
+    parts.push(val);
+  } else if (val >= 0 && val <= 0xff) {
+    parts.push(0xcc, val);
+  } else if (val >= 0 && val <= 0xffff) {
+    parts.push(0xcd, (val >> 8) & 0xff, val & 0xff);
+  } else if (val >= 0) {
+    parts.push(0xce, (val >> 24) & 0xff, (val >> 16) & 0xff, (val >> 8) & 0xff, val & 0xff);
+  } else if (val >= -32) {
+    parts.push(val & 0xff);
+  } else if (val >= -128) {
+    parts.push(0xd0, val & 0xff);
+  } else if (val >= -32768) {
+    parts.push(0xd1, (val >> 8) & 0xff, val & 0xff);
+  } else {
+    parts.push(0xd2, (val >> 24) & 0xff, (val >> 16) & 0xff, (val >> 8) & 0xff, val & 0xff);
+  }
+}
+
+function mpEncodeValue(parts: number[], value: unknown): void {
+  if (value === null || value === undefined) {
+    parts.push(0xc0);
+  } else if (value === true) {
+    parts.push(0xc3);
+  } else if (value === false) {
+    parts.push(0xc2);
+  } else if (typeof value === 'number') {
+    if (Number.isInteger(value)) {
+      mpEncodeInt(parts, value);
+    } else {
+      // float64
+      parts.push(0xcb);
+      const buf = new ArrayBuffer(8);
+      new DataView(buf).setFloat64(0, value, false);
+      const bytes = new Uint8Array(buf);
+      for (let i = 0; i < 8; i++) parts.push(bytes[i]);
+    }
+  } else if (typeof value === 'string') {
+    mpEncodeStr(parts, value);
+  } else if (Array.isArray(value)) {
+    const len = value.length;
+    if (len <= 15) {
+      parts.push(0x90 | len);
+    } else if (len <= 0xffff) {
+      parts.push(0xdc, (len >> 8) & 0xff, len & 0xff);
+    } else {
+      parts.push(0xdd, (len >> 24) & 0xff, (len >> 16) & 0xff, (len >> 8) & 0xff, len & 0xff);
+    }
+    for (const item of value) mpEncodeValue(parts, item);
+  } else if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>);
+    const len = entries.length;
+    if (len <= 15) {
+      parts.push(0x80 | len);
+    } else if (len <= 0xffff) {
+      parts.push(0xde, (len >> 8) & 0xff, len & 0xff);
+    } else {
+      parts.push(0xdf, (len >> 24) & 0xff, (len >> 16) & 0xff, (len >> 8) & 0xff, len & 0xff);
+    }
+    for (const [k, v] of entries) {
+      mpEncodeStr(parts, k);
+      mpEncodeValue(parts, v);
+    }
+  }
+}
+
+function mpEncode(value: unknown): Uint8Array {
+  const parts: number[] = [];
+  mpEncodeValue(parts, value);
+  return new Uint8Array(parts);
+}
+
+class MpDecoder {
+  private data: Uint8Array;
+  private pos: number;
+
+  constructor(data: Uint8Array) {
+    this.data = data;
+    this.pos = 0;
+  }
+
+  public getPos(): number {
+    return this.pos;
+  }
+
+  private ensure(n: number): void {
+    if (this.pos + n > this.data.length) {
+      throw new Error(`MessagePack decode truncated at ${this.pos}, need ${n} bytes`);
+    }
+  }
+
+  private readU8(): number {
+    this.ensure(1);
+    return this.data[this.pos++];
+  }
+
+  private readU16(): number {
+    this.ensure(2);
+    const v = (this.data[this.pos] << 8) | this.data[this.pos + 1];
+    this.pos += 2;
+    return v;
+  }
+
+  private readU32(): number {
+    this.ensure(4);
+    const v = (this.data[this.pos] << 24) | (this.data[this.pos + 1] << 16) |
+              (this.data[this.pos + 2] << 8) | this.data[this.pos + 3];
+    this.pos += 4;
+    return v >>> 0;
+  }
+
+  private readStr(len: number): string {
+    this.ensure(len);
+    const bytes = this.data.slice(this.pos, this.pos + len);
+    this.pos += len;
+    return new TextDecoder().decode(bytes);
+  }
+
+  decode(): unknown {
+    const b = this.readU8();
+
+    // positive fixint
+    if (b <= 0x7f) return b;
+    // negative fixint
+    if (b >= 0xe0) return b - 256;
+    // fixmap
+    if ((b & 0xf0) === 0x80) return this.decodeMap(b & 0x0f);
+    // fixarray
+    if ((b & 0xf0) === 0x90) return this.decodeArray(b & 0x0f);
+    // fixstr
+    if ((b & 0xe0) === 0xa0) return this.readStr(b & 0x1f);
+
+    switch (b) {
+      case 0xc0: return null;
+      case 0xc2: return false;
+      case 0xc3: return true;
+      case 0xcc: return this.readU8();
+      case 0xcd: return this.readU16();
+      case 0xce: return this.readU32();
+      case 0xd0: { const v = this.readU8(); return v > 127 ? v - 256 : v; }
+      case 0xd1: { const v = this.readU16(); return v > 32767 ? v - 65536 : v; }
+      case 0xd2: { const v = this.readU32(); return v > 2147483647 ? v - 4294967296 : v; }
+      case 0xd9: return this.readStr(this.readU8());
+      case 0xda: return this.readStr(this.readU16());
+      case 0xdb: return this.readStr(this.readU32());
+      // bin8/16/32 - treat as string
+      case 0xc4: return this.readStr(this.readU8());
+      case 0xc5: return this.readStr(this.readU16());
+      case 0xc6: return this.readStr(this.readU32());
+      case 0xca: {
+        this.ensure(4);
+        const buf = new ArrayBuffer(4);
+        const view = new Uint8Array(buf);
+        for (let i = 0; i < 4; i++) view[i] = this.data[this.pos++];
+        return new DataView(buf).getFloat32(0, false);
+      }
+      case 0xcb: {
+        this.ensure(8);
+        const buf = new ArrayBuffer(8);
+        const view = new Uint8Array(buf);
+        for (let i = 0; i < 8; i++) view[i] = this.data[this.pos++];
+        return new DataView(buf).getFloat64(0, false);
+      }
+      case 0xcf: {
+        // uint64 - read as number (may lose precision for very large values)
+        const hi = this.readU32();
+        const lo = this.readU32();
+        return hi * 0x100000000 + lo;
+      }
+      case 0xd3: {
+        // int64
+        const hi = this.readU32();
+        const lo = this.readU32();
+        const val = hi * 0x100000000 + lo;
+        return hi & 0x80000000 ? val - 0x10000000000000000 : val;
+      }
+      case 0xdc: {
+        const count = this.readU16();
+        if (count > MAX_MP_ARRAY) throw new Error(`MessagePack decode array too large: ${count}`);
+        return this.decodeArray(count);
+      }
+      case 0xdd: {
+        const count = this.readU32();
+        if (count > MAX_MP_ARRAY) throw new Error(`MessagePack decode array too large: ${count}`);
+        return this.decodeArray(count);
+      }
+      case 0xde: {
+        const count = this.readU16();
+        if (count > MAX_MP_MAP) throw new Error(`MessagePack decode map too large: ${count}`);
+        return this.decodeMap(count);
+      }
+      case 0xdf: {
+        const count = this.readU32();
+        if (count > MAX_MP_MAP) throw new Error(`MessagePack decode map too large: ${count}`);
+        return this.decodeMap(count);
+      }
+      default:
+        throw new Error(`Unknown MessagePack prefix: 0x${b.toString(16)}`);
+    }
+  }
+
+  private decodeMap(count: number): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
+    for (let i = 0; i < count; i++) {
+      const key = this.decode();
+      if (typeof key !== 'string') {
+        throw new Error(`MessagePack decode map key is not string: ${typeof key}`);
+      }
+      result[key] = this.decode();
+    }
+    return result;
+  }
+
+  private decodeArray(count: number): unknown[] {
+    const result: unknown[] = [];
+    for (let i = 0; i < count; i++) {
+      result.push(this.decode());
+    }
+    return result;
+  }
+}
+
+function mpDecode(data: Uint8Array): unknown {
+  try {
+    if (data.length > MAX_MP_SIZE) {
+      throw new Error(`MessagePack payload exceeds maximum ${MAX_MP_SIZE} bytes`);
+    }
+    const decoder = new MpDecoder(data);
+    const value = decoder.decode();
+    if (decoder.getPos() !== data.length) {
+      throw new Error(`MessagePack trailing bytes: ${data.length - decoder.getPos()}`);
+    }
+    return value;
+  } catch (e) {
+    throw new Error(`MessagePack decode failed (${data.length} bytes): ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function createRequestId(request: Request): string {
+  const xRequestId = request.headers.get('x-request-id');
+  if (xRequestId && xRequestId.trim()) {
+    return xRequestId;
+  }
+  if ('randomUUID' in crypto && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `homura-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function parseKvPrefetchKeys(path: string): string[] {
+  const keys = new Set<string>();
+
+  if (path === '/counter' || path === '/counter/reset') {
+    keys.add('counter');
+  }
+
+  const userMatch = path.match(/^\/kv\/users\/([^/?#]+)$/);
+  if (userMatch && userMatch[1]) {
+    try {
+      keys.add(`user:${decodeURIComponent(userMatch[1])}`);
+    } catch (e) {
+      keys.add(`user:${userMatch[1]}`);
+    }
+  }
+
+  return Array.from(keys);
+}
+
+async function prefetchKvData(env: Env, path: string): Promise<Record<string, string>> {
+  const kvData: Record<string, string> = {};
+  if (!env.HOMURA_KV) {
+    return kvData;
+  }
+
+  const keys = parseKvPrefetchKeys(path);
+  for (const key of keys) {
+    const value = await env.HOMURA_KV.get(key);
+    if (value !== null && value !== undefined) {
+      kvData[key] = value;
+    }
+  }
+  return kvData;
+}
+
+function summarizeLoopResults(results: LoopOpResult[]): LoopExecutionSummary[] {
+  const summary = new Map<string, LoopExecutionSummary>();
+  for (const result of results) {
+    const key = `${result.kind}:${result.op}`;
+    const current = summary.get(key) || {
+      kind: result.kind,
+      status: 'ok',
+      count: 0,
+      duration_ms: 0,
+      errors: [],
+    };
+
+    current.count += 1;
+    current.duration_ms += result.duration_ms || 0;
+    if (!result.ok) {
+      current.status = 'error';
+      current.errors.push(result.error || 'unknown error');
+    }
+    summary.set(key, current);
+  }
+  return Array.from(summary.values());
+}
+
+function validateStringRecord(value: unknown, label: string): Record<string, string> {
+  if (!isPlainObject(value)) {
+    throw new Error(`Invalid ${label}: expected object`);
+  }
+  const out: Record<string, string> = {};
+  let count = 0;
+  for (const [key, v] of Object.entries(value)) {
+    count++;
+    if (count > MAX_HEADER_COUNT) {
+      throw new Error(`Invalid ${label}: too many entries`);
+    }
+    if (typeof key !== 'string') {
+      throw new Error(`Invalid ${label} key: ${String(key)}`);
+    }
+    if (typeof v !== 'string') {
+      throw new Error(`Invalid ${label} value for "${key}": expected string`);
+    }
+    out[key] = v;
+  }
+  return out;
+}
+
+function validateResponseBody(value: unknown, path: string): unknown {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item, index) => validateResponseBody(item, `${path}[${index}]`));
+  }
+  if (isPlainObject(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (typeof key !== 'string') {
+        throw new Error(`Invalid response body key at ${path}: ${String(key)}`);
+      }
+      out[key] = validateResponseBody(item, `${path}.${key}`);
+    }
+    return out;
+  }
+  throw new Error(`Invalid response body at ${path}: ${typeof value}`);
+}
+
+function validateBindings(raw: unknown, path: string): unknown[] {
+  if (!Array.isArray(raw)) {
+    throw new Error(`Invalid ${path}: expected array`);
+  }
+  if (raw.length > MAX_SQL_BIND_COUNT) {
+    throw new Error(`Invalid ${path}: bind count too large`);
+  }
+  return raw;
+}
+
+function validateKvOp(raw: unknown, path: string): KvOp {
+  if (!isPlainObject(raw)) {
+    throw new Error(`Invalid ${path}: expected object`);
+  }
+  const op = typeof raw.op === 'string' ? raw.op : undefined;
+  const key = typeof raw.key === 'string' ? raw.key : undefined;
+  const value = raw.value;
+  if (op !== 'put' && op !== 'delete') {
+    throw new Error(`Invalid ${path}.op: ${String(op)}`);
+  }
+  if (!key) {
+    throw new Error(`Invalid ${path}.key`);
+  }
+  if (value !== undefined && typeof value !== 'string') {
+    throw new Error(`Invalid ${path}.value`);
+  }
+  return { op, key, value: typeof value === 'string' ? value : undefined };
+}
+
+function validateD1Op(raw: unknown, path: string): D1Op {
+  if (!isPlainObject(raw)) {
+    throw new Error(`Invalid ${path}: expected object`);
+  }
+  const op = typeof raw.op === 'string' ? raw.op : undefined;
+  if (!op || !['all', 'first', 'get', 'run', 'exec', 'batch', 'transaction'].includes(op)) {
+    throw new Error(`Invalid ${path}.op: ${String(op)}`);
+  }
+
+  if (op === 'batch' || op === 'transaction') {
+    const statements = Array.isArray((raw as Record<string, unknown>).statements)
+      ? (raw as Record<string, unknown>).statements
+      : undefined;
+    if (!Array.isArray(statements)) {
+      throw new Error(`Invalid ${path}.statements: expected array`);
+    }
+    if (statements.length > MAX_OPS_PER_LOOP) {
+      throw new Error(`Invalid ${path}.statements: too many statements`);
+    }
+    const normalizedStatements = statements.map((stmt, idx) => {
+      const normalized = validateD1Op(stmt, `${path}.statements[${idx}]`);
+      if (!normalized || normalized.op === 'batch' || normalized.op === 'transaction') {
+        throw new Error(`Invalid ${path}.statements[${idx}].op`);
+      }
+      return normalized;
+    });
+    return { op, statements: normalizedStatements };
+  }
+
+  const sql = typeof raw.sql === 'string' ? raw.sql : undefined;
+  if (!sql) {
+    throw new Error(`Invalid ${path}.sql`);
+  }
+  if (sql.length > MAX_SQL_LENGTH) {
+    throw new Error(`Invalid ${path}.sql: too long`);
+  }
+  const binds = raw.binds === undefined ? [] : validateBindings(raw.binds, `${path}.binds`);
+  return { op, sql, binds };
+}
+
+function normalizeResponseControl(raw: unknown): RubyRequestEnvelope['control'] {
+  if (raw === undefined) return { continue: false, ops: [] };
+  if (!isPlainObject(raw)) {
+    throw new Error('Invalid response.control: expected object');
+  }
+  const continueValue = raw.continue;
+  if (continueValue !== undefined && typeof continueValue !== 'boolean') {
+    throw new Error('Invalid response.control.continue: expected boolean');
+  }
+  const continueRequested = continueValue === true;
+  const continueOps = raw.ops === undefined ? [] : raw.ops;
+  if (!Array.isArray(continueOps)) {
+    throw new Error('Invalid response.control.ops: expected array');
+  }
+  if ((raw as Record<string, unknown>).ops !== undefined && !Array.isArray(raw.ops)) {
+    throw new Error('Invalid response.control.ops: expected array');
+  }
+  if (continueOps.length > MAX_OPS_PER_LOOP) {
+    throw new Error(`Too many control operations: ${continueOps.length}`);
+  }
+  return { continue: continueRequested, ops: continueOps };
+}
+
+function validateRubyResponse(raw: unknown): RubyResponse {
+  if (!isPlainObject(raw)) {
+    throw new Error(`Invalid Ruby response: expected object, got ${typeof raw}`);
+  }
+  const obj = raw as Record<string, unknown>;
+  if (obj.v !== HOMURA_MSGPACK_VERSION) {
+    throw new Error(`Invalid Ruby response version: expected ${HOMURA_MSGPACK_VERSION}, got ${String(obj.v)}`);
+  }
+  if (typeof obj.status !== 'number' || !Number.isInteger(obj.status) || obj.status < 100 || obj.status > 599) {
+    throw new Error(`Invalid Ruby response status: ${String(obj.status)}`);
+  }
+  const allowedTopLevel = new Set([
+    'v',
+    'status',
+    'headers',
+    'body',
+    'type',
+    'template',
+    'props',
+    'kv_ops',
+    'd1_ops',
+    'control',
+  ]);
+  for (const key of Object.keys(obj)) {
+    if (!allowedTopLevel.has(key)) {
+      throw new Error(`Invalid Ruby response key: ${key}`);
+    }
+  }
+  const headers = validateStringRecord(obj.headers, 'response.headers');
+  const body = 'body' in obj ? validateResponseBody(obj.body, 'response.body') : '';
+  const type = obj.type === undefined ? undefined : (typeof obj.type === 'string'
+    ? obj.type
+    : (() => { throw new Error('Invalid response.type: expected string'); })());
+  const template = obj.template === undefined ? undefined : (typeof obj.template === 'string'
+    ? obj.template
+    : (() => { throw new Error('Invalid response.template: expected string'); })());
+  const props = obj.props === undefined ? undefined : (isPlainObject(obj.props)
+    ? obj.props as Record<string, unknown>
+    : (() => { throw new Error('Invalid response.props: expected object'); })());
+  const kvOps = obj.kv_ops === undefined
+    ? undefined
+    : Array.isArray(obj.kv_ops)
+      ? obj.kv_ops.map((op, idx) => {
+          if (!isPlainObject(op)) {
+            throw new Error(`Invalid kv_op[${idx}]`);
+          }
+          if (typeof op.op !== 'string' || typeof op.key !== 'string') {
+            throw new Error(`Invalid kv_op[${idx}]`);
+          }
+          if (op.value !== undefined && typeof op.value !== 'string') {
+            throw new Error(`Invalid kv_op[${idx}].value`);
+          }
+          return {
+            op: op.op,
+            key: op.key,
+            value: typeof op.value === 'string' ? op.value : undefined,
+          };
+        })
+        : undefined;
+  const d1Ops = obj.d1_ops === undefined
+    ? undefined
+    : Array.isArray(obj.d1_ops)
+      ? obj.d1_ops.map((op, idx) => validateD1Op(op, `response.d1_ops[${idx}]`))
+      : (() => {
+          throw new Error('Invalid response.d1_ops: expected array');
+        })();
+  if (obj.kv_ops !== undefined && !Array.isArray(obj.kv_ops)) {
+    throw new Error('Invalid response.kv_ops: expected array');
+  }
+  if (obj.d1_ops !== undefined && !Array.isArray(obj.d1_ops)) {
+    throw new Error('Invalid response.d1_ops: expected array');
+  }
+  if (obj.control !== undefined && !isPlainObject(obj.control)) {
+    throw new Error('Invalid response.control: expected object');
+  }
+  const control = obj.control === undefined
+    ? undefined
+    : {
+        continue: normalizeResponseControl(obj.control).continue,
+        ops: normalizeResponseControl(obj.control).ops,
+      };
+
+  return {
+    v: HOMURA_MSGPACK_VERSION,
+    status: obj.status,
+    headers,
+    body,
+    type,
+    template,
+    props,
+    kv_ops: kvOps,
+    d1_ops: d1Ops,
+    control,
+  };
+}
+
+function normalizeLoopOps(rawOps: unknown[]): RubyLoopOp[] {
+  const out: RubyLoopOp[] = [];
+  for (let i = 0; i < rawOps.length; i++) {
+    const raw = rawOps[i];
+    if (!isPlainObject(raw)) {
+      throw new Error(`Invalid control operation at index ${i}: expected object`);
+    }
+
+    const explicitKind = typeof raw.kind === 'string' ? raw.kind : undefined;
+    const rawOp = typeof raw.op === 'string' ? raw.op : undefined;
+    const opName = rawOp || '';
+
+    if (explicitKind === 'kv' || opName === 'put' || opName === 'delete') {
+      out.push({
+        kind: 'kv',
+        ...validateKvOp(raw, `control.ops[${i}]`),
+      });
+      continue;
+    }
+
+    if (explicitKind === 'd1') {
+      const d1Op = validateD1Op(raw, `control.ops[${i}]`);
+      out.push({ kind: 'd1', ...d1Op });
+      continue;
+    }
+
+    if (opName.startsWith('d1_')) {
+      const normalized = validateD1Op(
+        {
+          ...raw,
+          op: opName.replace(/^d1_/, ''),
+          sql: raw.sql,
+          binds: raw.binds,
+        },
+        `control.ops[${i}]`,
+      );
+      out.push({ kind: 'd1', ...normalized });
+      continue;
+    }
+
+    throw new Error(`Invalid control.ops[${i}].kind/op: unsupported operation`);
+  }
+  return out;
+}
+
+async function executeKvOps(env: Env, ops: Array<KvOp | D1Op>): Promise<LoopOpResult[]> {
+  const out: LoopOpResult[] = [];
+  if (!ops || ops.length === 0) return out;
+  for (const rawOp of ops) {
+    const start = performance.now();
+    if (rawOp.op !== 'put' && rawOp.op !== 'delete') {
+      out.push({
+        kind: 'kv',
+        op: rawOp.op,
+        ok: false,
+        error: `Invalid kv op: ${rawOp.op}`,
+        duration_ms: Math.round((performance.now() - start) * 100) / 100,
+      });
+      continue;
+    }
+    if (!env.HOMURA_KV) {
+      throw new Error('HOMURA_KV binding missing for kv operation');
+    }
+    try {
+      if (rawOp.op === 'put') {
+        await env.HOMURA_KV.put(rawOp.key, rawOp.value ?? '');
+      } else if (rawOp.op === 'delete') {
+        await env.HOMURA_KV.delete(rawOp.key);
+      }
+      out.push({
+        kind: 'kv',
+        op: rawOp.op,
+        ok: true,
+        duration_ms: Math.round((performance.now() - start) * 100) / 100,
+      });
+    } catch (e) {
+      out.push({
+        kind: 'kv',
+        op: rawOp.op,
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        duration_ms: Math.round((performance.now() - start) * 100) / 100,
+      });
+    }
+  }
+  return out;
+}
+
+async function executeD1Ops(env: Env, ops: D1Op[]): Promise<LoopOpResult[]> {
+  const out: LoopOpResult[] = [];
+  if (!ops || ops.length === 0) return out;
+  if (!env.HOMURA_DB) {
+    throw new Error('HOMURA_DB binding missing for D1 operation');
+  }
+
+  const normalizeNumericMeta = (value: unknown): number | undefined => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'bigint') {
+      const numeric = Number(value);
+      return Number.isSafeInteger(numeric) ? numeric : undefined;
+    }
+    return undefined;
+  };
+
+  const normalizeRunResult = (result: unknown): { [key: string]: unknown } | null => {
+    if (!result || typeof result !== 'object') {
+      return null;
+    }
+    const runResult = result as Record<string, unknown>;
+    const meta = isPlainObject(runResult.meta) ? (runResult.meta as Record<string, unknown>) : {};
+    const affectedRows = normalizeNumericMeta(meta.changes);
+    const lastRowId = normalizeNumericMeta(meta.last_row_id);
+    return {
+      affected_rows: affectedRows,
+      last_row_id: lastRowId,
+    };
+  };
+
+  const resolveD1Sql = (sql: string): string => {
+    if (!sql.startsWith('stmt:')) {
+      return sql;
+    }
+    const resolved = NAMED_D1_STATEMENTS[sql];
+    if (!resolved) {
+      throw new Error(`Unknown D1 statement token: ${sql}`);
+    }
+    return resolved;
+  };
+
+  const executeSingle = async (rawOp: D1Op): Promise<{ ok: boolean; result?: unknown; error?: string }> => {
+    if (rawOp.op !== 'batch' && rawOp.op !== 'transaction') {
+      const resolvedSql = typeof rawOp.sql === 'string' ? resolveD1Sql(rawOp.sql) : rawOp.sql;
+      if (typeof resolvedSql !== 'string' || resolvedSql.length > MAX_SQL_LENGTH) {
+        throw new Error('D1 SQL exceeds limit');
+      }
+      if (rawOp.binds && rawOp.binds.length > MAX_SQL_BIND_COUNT) {
+        throw new Error('D1 bind count exceeds limit');
+      }
+    }
+
+    try {
+      if (rawOp.op === 'batch' || rawOp.op === 'transaction') {
+        const statements = rawOp.statements || [];
+        if (rawOp.op === 'transaction') {
+          await env.HOMURA_DB.prepare('BEGIN').run();
+        }
+        const statementResults: Array<{ op: string; ok: boolean; result?: unknown; error?: string }> = [];
+        for (const stmt of statements) {
+          const resolvedSql = typeof stmt.sql === 'string' ? resolveD1Sql(stmt.sql) : stmt.sql;
+          if (typeof resolvedSql !== 'string' || resolvedSql.length > MAX_SQL_LENGTH) {
+            throw new Error('D1 SQL exceeds limit');
+          }
+          if (stmt.binds && stmt.binds.length > MAX_SQL_BIND_COUNT) {
+            throw new Error('D1 bind count exceeds limit');
+          }
+
+          const statement = env.HOMURA_DB.prepare(resolvedSql).bind(...(stmt.binds ?? []));
+          if (stmt.op === 'all') {
+            const result = await statement.all();
+            statementResults.push({ op: stmt.op, ok: true, result });
+          } else if (stmt.op === 'first' || stmt.op === 'get') {
+            const result = await statement.first();
+            statementResults.push({ op: stmt.op, ok: true, result });
+          } else if (stmt.op === 'run') {
+            const result = await statement.run();
+            statementResults.push({ op: stmt.op, ok: true, result: normalizeRunResult(result) ?? result });
+          } else if (stmt.op === 'exec') {
+            const result = await env.HOMURA_DB.exec(stmt.sql);
+            statementResults.push({ op: stmt.op, ok: true, result });
+          } else {
+            throw new Error(`Unsupported D1 statement op: ${stmt.op}`);
+          }
+        }
+
+        if (rawOp.op === 'transaction') {
+          await env.HOMURA_DB.prepare('COMMIT').run();
+        }
+
+        return { ok: true, result: statementResults };
+      }
+
+      const resolvedSql = resolveD1Sql(rawOp.sql);
+      const statement = env.HOMURA_DB.prepare(resolvedSql).bind(...(rawOp.binds ?? []));
+      if (rawOp.op === 'all') {
+        const result = await statement.all();
+        return { ok: true, result };
+      }
+      if (rawOp.op === 'get' || rawOp.op === 'first') {
+        const result = await statement.first();
+        return { ok: true, result };
+      }
+      if (rawOp.op === 'run') {
+        const result = await statement.run();
+        return { ok: true, result: normalizeRunResult(result) ?? result };
+      }
+      if (rawOp.op === 'exec') {
+        const result = await env.HOMURA_DB.exec(rawOp.sql);
+        return { ok: true, result };
+      }
+      return { ok: false, error: `Unsupported D1 op: ${rawOp.op}` };
+    } catch (e) {
+      if (rawOp.op === 'transaction') {
+        try { await env.HOMURA_DB.prepare('ROLLBACK').run(); } catch {}
+      }
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  };
+
+  for (const op of ops) {
+    const start = performance.now();
+    try {
+      const outcome = await executeSingle(op);
+      if (outcome.ok && op.op === 'run' && outcome.result) {
+        outcome.result = normalizeRunResult(outcome.result) ?? outcome.result;
+      }
+      out.push({ kind: 'd1', op: op.op, ...outcome, duration_ms: Math.round((performance.now() - start) * 100) / 100 });
+    } catch (e) {
+      out.push({
+        kind: 'd1',
+        op: op.op,
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        duration_ms: Math.round((performance.now() - start) * 100) / 100,
+      });
+    }
+  }
+  return out;
+}
+
+async function executeLoopOps(env: Env, result: RubyResponse): Promise<LoopOpResult[]> {
+  const kvOps: KvOp[] = (result.kv_ops ?? []).map((op) => ({ ...op, kind: 'kv' as const })) as KvOp[];
+  const d1Ops: D1Op[] = result.d1_ops ?? [];
+  const controlOps = result.control?.ops ? normalizeLoopOps(result.control.ops) : [];
+
+  const mergedOps = [
+    ...kvOps.map((op): RubyLoopOp => ({ kind: 'kv', ...op })),
+    ...d1Ops.map((op): RubyLoopOp => ({ kind: 'd1', ...op })),
+    ...controlOps,
+  ];
+  if (mergedOps.length > MAX_OPS_PER_LOOP) {
+    throw new Error(`Too many operations in one loop: ${mergedOps.length}`);
+  }
+
+  const results: LoopOpResult[] = [];
+  for (const op of mergedOps) {
+    if (op.kind === 'kv') {
+      const kvResult = await executeKvOps(env, [op as KvOp]);
+      if (kvResult.length > 0) {
+        results.push(...kvResult);
+      }
+      continue;
+    }
+    if (op.kind === 'd1') {
+      const d1Result = await executeD1Ops(env, [op as D1Op]);
+      if (d1Result.length > 0) {
+        results.push(...d1Result);
+      }
+      continue;
+    }
+  }
+  return results;
+}
+
+// ─── Longjmp support for wasm-sjlj ────────────────────────────────
+
 class WasmLongjmpException {
   constructor(public buf: number, public value: number) {}
 }
 
-// setjmp buffer registry
 const jmpBufRegistry = new Map<number, { label: number; sp: number }>();
 let labelCounter = 1;
 
-// mruby instance wrapper
+// ─── mruby instance wrapper ───────────────────────────────────────
+
 class MRuby {
   private instance: WebAssembly.Instance | null = null;
+
+  private getMemory(): WebAssembly.Memory {
+    if (!this.instance) throw new Error('mruby not initialized');
+    return this.instance.exports.memory as WebAssembly.Memory;
+  }
+
+  private invokeWithLongjmpRetry<T>(label: string, fn: () => T): T {
+    let attempts = 0;
+
+    while (true) {
+      try {
+        return fn();
+      } catch (error) {
+        if (!(error instanceof WasmLongjmpException)) {
+          throw error;
+        }
+
+        if (!jmpBufRegistry.has(error.buf)) {
+          throw new Error(`[homura] unknown longjmp buffer during ${label}: ${error.buf}`);
+        }
+
+        attempts += 1;
+        if (DEBUG_LONGJMP) {
+          const entry = jmpBufRegistry.get(error.buf);
+          console.warn('[homura][longjmp]', {
+            phase: 'retry',
+            label,
+            attempt: attempts,
+            buf: error.buf,
+            value: error.value,
+            registry: entry,
+          });
+        }
+        if (attempts > MAX_LONGJMP_RETRIES) {
+          throw new Error(`[homura] exceeded longjmp retry budget during ${label}`);
+        }
+      }
+    }
+  }
 
   async init(): Promise<void> {
     if (this.instance) return;
 
-    const getMemory = (): WebAssembly.Memory => {
-      return this.instance!.exports.memory as WebAssembly.Memory;
-    };
-
     const wasiImports = {
       clock_res_get: (id: number, resPtr: number) => {
         try {
-          const memory = getMemory();
+          const memory = this.getMemory();
           const view = new DataView(memory.buffer);
           view.setBigUint64(resPtr, BigInt(1000000), true);
-        } catch {}
+        } catch (e) { console.warn('[wasi] clock_res_get error:', e); }
         return 0;
       },
       clock_time_get: (id: number, precision: bigint, timePtr: number) => {
         try {
-          const memory = getMemory();
+          const memory = this.getMemory();
           const view = new DataView(memory.buffer);
           view.setBigUint64(timePtr, BigInt(Date.now()) * BigInt(1000000), true);
-        } catch {}
+        } catch (e) { console.warn('[wasi] clock_time_get error:', e); }
         return 0;
       },
       fd_write: (fd: number, iovs: number, iovsLen: number, nwritten: number) => {
         try {
-          const memory = getMemory();
+          const memory = this.getMemory();
           const view = new DataView(memory.buffer);
           const decoder = new TextDecoder();
           let written = 0;
@@ -62,7 +1028,7 @@ class MRuby {
             written += len;
           }
           view.setUint32(nwritten, written, true);
-        } catch {}
+        } catch (e) { console.warn('[wasi] fd_write error:', e); }
         return 0;
       },
       fd_read: () => 0,
@@ -82,13 +1048,13 @@ class MRuby {
       fd_filestat_set_times: () => 0,
       fd_fdstat_get: (fd: number, statPtr: number) => {
         try {
-          const memory = getMemory();
+          const memory = this.getMemory();
           const view = new DataView(memory.buffer);
           view.setUint8(statPtr, fd <= 2 ? 2 : 4);
           view.setUint16(statPtr + 2, 0, true);
           view.setBigUint64(statPtr + 8, BigInt(0xffffffff), true);
           view.setBigUint64(statPtr + 16, BigInt(0xffffffff), true);
-        } catch {}
+        } catch (e) { console.warn('[wasi] fd_fdstat_get error:', e); }
         return 0;
       },
       fd_fdstat_set_flags: () => 0,
@@ -108,21 +1074,21 @@ class MRuby {
       environ_get: () => 0,
       environ_sizes_get: (countPtr: number, sizePtr: number) => {
         try {
-          const memory = getMemory();
+          const memory = this.getMemory();
           const view = new DataView(memory.buffer);
           view.setUint32(countPtr, 0, true);
           view.setUint32(sizePtr, 0, true);
-        } catch {}
+        } catch (e) { console.warn('[wasi] environ_sizes_get error:', e); }
         return 0;
       },
       args_get: () => 0,
       args_sizes_get: (countPtr: number, sizePtr: number) => {
         try {
-          const memory = getMemory();
+          const memory = this.getMemory();
           const view = new DataView(memory.buffer);
           view.setUint32(countPtr, 0, true);
           view.setUint32(sizePtr, 0, true);
-        } catch {}
+        } catch (e) { console.warn('[wasi] args_sizes_get error:', e); }
         return 0;
       },
       proc_exit: (code: number) => {
@@ -131,10 +1097,10 @@ class MRuby {
       },
       random_get: (buf: number, bufLen: number) => {
         try {
-          const memory = getMemory();
+          const memory = this.getMemory();
           const bytes = new Uint8Array(memory.buffer, buf, bufLen);
           crypto.getRandomValues(bytes);
-        } catch {}
+        } catch (e) { console.warn('[wasi] random_get error:', e); }
         return 0;
       },
       poll_oneoff: () => 0,
@@ -147,14 +1113,35 @@ class MRuby {
 
     const envImports = {
       __wasm_setjmp: (buf: number, sp: number): void => {
-        const label = labelCounter++;
-        jmpBufRegistry.set(buf, { label, sp });
         const memory = this.instance!.exports.memory as WebAssembly.Memory;
         const view = new DataView(memory.buffer);
+        const label = labelCounter++;
+
+        jmpBufRegistry.set(buf, { label, sp });
         view.setInt32(buf, label, true);
         view.setInt32(buf + 4, sp, true);
+        view.setInt32(buf + 8, 0, true);
+        if (DEBUG_LONGJMP) {
+          console.warn('[homura][longjmp]', {
+            phase: 'setjmp',
+            buf,
+            sp,
+            label,
+          });
+        }
       },
       __wasm_longjmp: (buf: number, value: number): void => {
+        const memory = this.instance!.exports.memory as WebAssembly.Memory;
+        const view = new DataView(memory.buffer);
+        view.setInt32(buf + 8, value || 1, true);
+        if (DEBUG_LONGJMP) {
+          console.warn('[homura][longjmp]', {
+            phase: 'longjmp',
+            buf,
+            value: value || 1,
+            registry: jmpBufRegistry.get(buf),
+          });
+        }
         throw new WasmLongjmpException(buf, value || 1);
       },
       __wasm_setjmp_test: (buf: number, curLabel: number): number => {
@@ -162,7 +1149,26 @@ class MRuby {
         const view = new DataView(memory.buffer);
         const storedLabel = view.getInt32(buf, true);
         if (storedLabel === curLabel) {
-          return view.getInt32(buf + 8, true);
+          const value = view.getInt32(buf + 8, true);
+          view.setInt32(buf + 8, 0, true);
+          if (DEBUG_LONGJMP) {
+            console.warn('[homura][longjmp]', {
+              phase: 'setjmp_test_match',
+              buf,
+              curLabel,
+              storedLabel,
+              value,
+            });
+          }
+          return value;
+        }
+        if (DEBUG_LONGJMP) {
+          console.warn('[homura][longjmp]', {
+            phase: 'setjmp_test_miss',
+            buf,
+            curLabel,
+            storedLabel,
+          });
         }
         return 0;
       },
@@ -180,13 +1186,15 @@ class MRuby {
     }
   }
 
+  /**
+   * Evaluate Ruby code string. Used ONLY for loading framework core
+   * and user routes (trusted code). NEVER for user input.
+   */
   eval(code: string): string {
-    if (!this.instance) {
-      throw new Error('mruby not initialized');
-    }
+    if (!this.instance) throw new Error('mruby not initialized');
 
     const exports = this.instance.exports as any;
-    const memory = this.instance.exports.memory as WebAssembly.Memory;
+    const memory = this.getMemory();
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
 
@@ -200,23 +1208,12 @@ class MRuby {
 
     new Uint8Array(memory.buffer).set(codeBytes, bufferPtr);
 
-    let evalError: string | null = null;
-    try {
+    this.invokeWithLongjmpRetry('eval', () => {
       exports.homura_eval();
-    } catch (e) {
-      if (e instanceof WasmLongjmpException) {
-        console.error('[homura] Ruby exception (longjmp), buf:', e.buf, 'value:', e.value);
-        evalError = `Ruby exception occurred (longjmp value: ${e.value})`;
-      } else {
-        throw e;
-      }
-    }
+      return 0;
+    });
 
-    if (evalError) {
-      return JSON.stringify({ status: 500, body: { error: evalError }, headers: { "Content-Type": "application/json" } });
-    }
-
-    const currentMemory = this.instance.exports.memory as WebAssembly.Memory;
+    const currentMemory = this.getMemory();
     const resultPtr = exports.homura_get_result();
     const memoryView = new Uint8Array(currentMemory.buffer);
     let resultEnd = resultPtr;
@@ -224,9 +1221,121 @@ class MRuby {
       resultEnd++;
     }
 
-    const result = decoder.decode(new Uint8Array(currentMemory.buffer, resultPtr, resultEnd - resultPtr));
-    console.log('[homura] eval result:', result.substring(0, 200));
-    return result;
+    return decoder.decode(new Uint8Array(currentMemory.buffer, resultPtr, resultEnd - resultPtr));
+  }
+
+  parseEvalFailure(result: string): string | null {
+    const trimmed = result.trim();
+    if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null;
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      if (parsed.status >= 400) {
+        const body = parsed.body;
+        if (typeof body === 'string') {
+          return body;
+        }
+        if (body && typeof body === 'object' && 'error' in body) {
+          return (body.error as string) || result;
+        }
+        return result;
+      }
+      if (typeof parsed.error === 'string') {
+        return parsed.error;
+      }
+    } catch (_error) {
+      return null;
+    }
+    return null;
+  }
+
+  /**
+   * Handle a request via MessagePack serialization (safe from injection).
+   * Sends env as MessagePack → homura_handle_request → returns decoded response.
+   */
+  handleRequest(env: RubyRequestEnvelope): RubyResponse {
+    if (!this.instance) throw new Error('mruby not initialized');
+
+    const exports = this.instance.exports as any;
+    const memory = this.getMemory();
+
+    const encoded = mpEncode(env);
+    const bufferPtr = exports.homura_get_input_buffer();
+    const bufferSize = exports.homura_get_buffer_size();
+
+    if (encoded.length > bufferSize || encoded.length > MAX_MP_SIZE) {
+      return {
+        v: HOMURA_MSGPACK_VERSION,
+        status: 413,
+        headers: { 'Content-Type': 'text/plain' },
+        body: 'Request too large',
+      };
+    }
+
+    new Uint8Array(memory.buffer).set(encoded, bufferPtr);
+
+    const success = this.invokeWithLongjmpRetry('handle_request', () => exports.homura_handle_request(encoded.length) as number);
+
+    const outputLen = exports.homura_get_output_length();
+    const outputPtr = exports.homura_get_output_buffer();
+
+    if (!success || outputLen <= 0) {
+      console.error('[homura] handleRequest reported non-success', {
+        success,
+        outputLen,
+      });
+      const currentMemory = this.instance.exports.memory as WebAssembly.Memory;
+      const decoder = new TextDecoder();
+      let output = '';
+      if (outputLen > 0) {
+        const outputData = new Uint8Array(currentMemory.buffer, outputPtr, outputLen);
+        console.error('[homura] handleRequest raw output head', {
+          hex: Array.from(outputData.slice(0, 16)).map((byte) => byte.toString(16).padStart(2, '0')),
+          text: decoder.decode(outputData),
+        });
+        try {
+          const decoded = mpDecode(outputData);
+          const result = validateRubyResponse(decoded);
+          return result;
+        } catch (decodeError) {
+          output = decoder.decode(outputData);
+          console.error('[homura] Failed to decode request response:', decodeError);
+        }
+      }
+      return {
+        v: HOMURA_MSGPACK_VERSION,
+        status: 500,
+        headers: { 'Content-Type': 'text/plain' },
+        body: output || 'Internal Server Error',
+      };
+    }
+
+    const outputData = new Uint8Array(memory.buffer, outputPtr, outputLen);
+    try {
+      const result = mpDecode(outputData);
+      return validateRubyResponse(result);
+    } catch (decodeError) {
+      const output = new TextDecoder().decode(outputData);
+      console.error('[homura] Failed to decode/validate successful request response:', {
+        outputLen,
+        firstByte: outputData[0],
+        hex: Array.from(outputData.slice(0, 16)).map((b) => b.toString(16).padStart(2, '0')).join(' '),
+        output,
+        error: decodeError instanceof Error ? decodeError.message : String(decodeError),
+      });
+      throw decodeError;
+    }
+  }
+
+  /** Run a full GC cycle to reclaim mruby heap between requests. */
+  gc(): void {
+    if (this.instance) {
+      const exports = this.instance.exports as any;
+      if (typeof exports.homura_gc === 'function') {
+        exports.homura_gc();
+      }
+    }
   }
 
   close(): void {
@@ -238,137 +1347,230 @@ class MRuby {
   }
 }
 
+// ─── Worker Entry ─────────────────────────────────────────────────
+
 interface Env {
   HOMURA_KV: KVNamespace;
-}
-
-// KV prefetch configuration for this webapp
-const KV_PREFETCH_CONFIG: Record<string, string[]> = {
-  '/': ['counter'],
-  '/counter': ['counter'],
-};
-
-function getKvKeysForPath(path: string): string[] {
-  const keys: string[] = [];
-  for (const [pattern, prefetchKeys] of Object.entries(KV_PREFETCH_CONFIG)) {
-    if (path === pattern || path.startsWith(pattern + '/')) {
-      keys.push(...prefetchKeys);
-    }
-  }
-  const kvUserMatch = path.match(/^\/kv\/users\/([^/]+)$/);
-  if (kvUserMatch) {
-    keys.push(`user:${decodeURIComponent(kvUserMatch[1])}`);
-  }
-  return [...new Set(keys)];
+  HOMURA_DB?: D1Database;
 }
 
 let mruby: MRuby | null = null;
 let coreLoaded = false;
 
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
+// Mutex to serialize access to the mruby WASM instance.
+// Without this, concurrent requests interleave at await points (D1 ops),
+// corrupting shared WASM memory buffers → "memory access out of bounds".
+let mrubyLock: Promise<void> = Promise.resolve();
+function withMrubyLock<T>(fn: () => Promise<T>): Promise<T> {
+  let release: () => void;
+  const next = new Promise<void>((resolve) => { release = resolve; });
+  const wait = mrubyLock;
+  mrubyLock = next;
+  return wait.then(fn).finally(() => release!());
+}
 
-    // Serve static assets directly (CSS)
-    if (url.pathname === '/assets/app.css') {
+export default {
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === 'GET' && url.pathname === '/favicon.ico') {
+      return new Response(null, { status: 204 });
+    }
+    if (request.method === 'GET' && url.pathname === '/assets/app.css') {
       return new Response(APP_CSS, {
-        headers: { 'Content-Type': 'text/css' },
+        status: 200,
+        headers: {
+          'Content-Type': 'text/css; charset=utf-8',
+          'Cache-Control': 'public, max-age=3600',
+        },
       });
     }
 
+    const requestId = createRequestId(request);
+    const requestLogBase = {
+      event: 'homura_request_start',
+      request_id: requestId,
+      method: request.method,
+      path: url.pathname,
+      strategy: HOMURA_LOOP_STRATEGY,
+    };
+
+    console.info(JSON.stringify(requestLogBase));
+
+    // Read body and prefetch KV BEFORE acquiring the lock (these don't touch WASM)
+    const method = request.method;
+    let bodyStr = '';
+    if (['POST', 'PUT', 'PATCH'].includes(method)) {
+      bodyStr = await request.text();
+    }
+    const kvData = await prefetchKvData(env, url.pathname);
+
     try {
+      return await withMrubyLock(async () => {
+      // Initialize mruby VM
       if (!mruby) {
         mruby = new MRuby();
         await mruby.init();
       }
 
+      // Load framework core and user routes (trusted code, eval is safe here)
       if (!coreLoaded) {
-        mruby.eval(HOMURA_CORE);
-        mruby.eval(USER_ROUTES);
+        const coreResult = mruby.eval(HOMURA_CORE);
+        const coreError = mruby.parseEvalFailure(coreResult);
+        if (coreError) {
+          console.error('[homura] Failed to load core:', coreError);
+          mruby = null;
+          throw new Error('Framework initialization failed');
+        }
+        const routeResult = mruby.eval(USER_ROUTES);
+        const routeError = mruby.parseEvalFailure(routeResult);
+        if (routeError) {
+          console.error('[homura] Failed to load routes:', routeError);
+          mruby = null;
+          throw new Error('Route loading failed');
+        }
         coreLoaded = true;
       }
 
-      const kvKeys = getKvKeysForPath(url.pathname);
-      const kvData: Record<string, string | null> = {};
-      if (env.HOMURA_KV && kvKeys.length > 0) {
-        await Promise.all(
-          kvKeys.map(async (key) => {
-            kvData[key] = await env.HOMURA_KV.get(key);
+      // Build env as structured data (NO string interpolation / eval)
+      const rubyEnv: RubyRequestEnvelope = {
+        v: HOMURA_MSGPACK_VERSION,
+        request: {
+          method,
+          path: url.pathname,
+          query: Object.fromEntries(url.searchParams.entries()),
+          headers: Object.fromEntries(request.headers.entries()),
+          body: bodyStr,
+          content_type: request.headers.get('Content-Type') || '',
+          kv_data: kvData,
+        },
+        control: { continue: false },
+      };
+
+      let loopCount = 0;
+      let currentResult: RubyResponse | null = null;
+      const rubyRequest = rubyEnv;
+      let requestEnvelope: RubyRequestEnvelope = { ...rubyRequest, control: { continue: false } };
+      const completedD1Results: LoopOpResult[] = [];
+      let totalOperations = 0;
+      let totalLoopMs = 0;
+      const totalFailures: string[] = [];
+
+      while (true) {
+        let rawResult: RubyResponse;
+        try {
+          rawResult = mruby.handleRequest(requestEnvelope);
+        } catch (wasmError) {
+          // WASM memory corruption → destroy instance so next request gets a fresh one
+          console.error('[homura] WASM error, resetting mruby instance:', wasmError);
+          try { mruby.close(); } catch (_) { /* ignore close errors */ }
+          mruby = null;
+          coreLoaded = false;
+          throw wasmError;
+        }
+        currentResult = validateRubyResponse(rawResult);
+        const loopOps = await executeLoopOps(env, currentResult);
+        const summary = summarizeLoopResults(loopOps);
+        const loopMs = loopOps.reduce((acc, item) => acc + (item.duration_ms || 0), 0);
+        const requestErrors = summary.flatMap((entry) => entry.errors);
+        totalOperations += loopOps.length;
+        totalLoopMs += loopMs;
+        totalFailures.push(...requestErrors);
+
+        console.info(
+          JSON.stringify({
+            event: 'homura_loop_exec',
+            request_id: requestId,
+            loop: loopCount + 1,
+            d1_enabled: !!env.HOMURA_DB,
+            operation_count: loopOps.length,
+            d1_operation_count: summary.filter((entry) => entry.kind === 'd1').reduce((acc, entry) => acc + entry.count, 0),
+            d1_ms: summary.filter((entry) => entry.kind === 'd1').reduce((acc, entry) => acc + entry.duration_ms, 0),
+            kv_operation_count: summary.filter((entry) => entry.kind === 'kv').reduce((acc, entry) => acc + entry.count, 0),
+            loop_ms: loopMs,
+            failure_reasons: requestErrors,
           })
         );
+
+        // continue loop のために操作は必ず実行。失敗時は全体500へ倒す。
+        const nextOps = loopOps.filter((op) => op.kind === 'd1');
+        if (currentResult.control?.continue && loopOps.length === 0) {
+          throw new Error('Continue requested but no operations returned');
+        }
+        if (loopCount >= MAX_LOOP_ITERATIONS) {
+          throw new Error('Maximum loop iterations exceeded');
+        }
+        loopCount++;
+
+        if (!currentResult.control?.continue) {
+          break;
+        }
+        if (nextOps.length === 0) {
+          throw new Error('Continue requested but no executable operations');
+        }
+        completedD1Results.push(...nextOps);
+        requestEnvelope = {
+          ...rubyRequest,
+          control: {
+            continue: true,
+            // Ruby側再実行時に、実行結果を渡す
+            ops: completedD1Results.map((op) => ({
+              kind: op.kind,
+              op: op.op,
+              ok: op.ok,
+              result: op.result,
+              error: op.error,
+            })),
+          },
+        };
       }
 
-      const kvDataEntries = Object.entries(kvData)
-        .filter(([_, v]) => v !== null)
-        .map(([k, v]) => `"${k}" => "${(v as string).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`)
-        .join(', ');
-      const kvDataRuby = `{ ${kvDataEntries} }`;
-
-      let bodyStr = '';
-      if (['POST', 'PUT', 'PATCH'].includes(request.method)) {
-        bodyStr = await request.text();
+      if (!currentResult) {
+        throw new Error('No response from Ruby runtime');
       }
+      const result = currentResult;
+      const { status, headers } = result;
+      let response: Response;
 
-      const escapedBody = bodyStr
-        .replace(/\\/g, '\\\\')
-        .replace(/"/g, '\\"')
-        .replace(/\n/g, '\\n')
-        .replace(/\r/g, '\\r');
-
-      const envCode = `
-        env = { method: "${request.method}", path: "${url.pathname}", body: "${escapedBody}", kv_data: ${kvDataRuby} }
-        $app.call(env)
-      `;
-
-      const resultJson = mruby.eval(envCode);
-
-      let result: { status: number; body: string; headers: Record<string, string>; kv_ops?: Array<{ op: string; key: string; value?: string }> };
-      try {
-        result = JSON.parse(resultJson);
-      } catch (e) {
-        return new Response(
-          JSON.stringify({ error: 'Parse error', raw: resultJson }),
-          { status: 500, headers: { 'Content-Type': 'application/json' } }
-        );
-      }
-
-      if (result.kv_ops && result.kv_ops.length > 0 && env.HOMURA_KV) {
-        ctx.waitUntil(
-          (async () => {
-            for (const op of result.kv_ops!) {
-              try {
-                if (op.op === 'put' && op.value !== undefined) {
-                  await env.HOMURA_KV.put(op.key, op.value);
-                } else if (op.op === 'delete') {
-                  await env.HOMURA_KV.delete(op.key);
-                }
-              } catch (e) {
-                console.error('[homura kv] error:', op, e);
-              }
-            }
-          })()
-        );
-      }
-
-      const headers = result.headers || {};
-
-      if ((result as any).type === 'jsx') {
-        const templateName = (result as any).template;
-        const props = (result as any).props || {};
+      // Handle JSX template rendering
+      if (result.type === 'jsx') {
+        const templateName = result.template as string;
+        const props = (result.props as Record<string, unknown>) || {};
         const html = renderTemplate(templateName, props);
-        return new Response(html, {
-          status: result.status,
+        response = new Response(html, {
+          status,
           headers: { ...headers, 'Content-Type': 'text/html' },
         });
+      } else {
+        const responseBody = typeof result.body === 'object'
+          ? JSON.stringify(result.body)
+          : String(result.body ?? '');
+        response = new Response(responseBody, { status, headers });
       }
+      console.info(JSON.stringify({
+        event: 'homura_request_complete',
+        request_id: requestId,
+        path: url.pathname,
+        status,
+        loop_count: loopCount,
+        total_op_count: totalOperations,
+        total_loop_ms: totalLoopMs,
+        failure_reasons: totalFailures,
+      }));
 
-      const responseBody = typeof result.body === 'object' ? JSON.stringify(result.body) : result.body;
-      return new Response(responseBody, {
-        status: result.status,
-        headers,
-      });
+      // Reclaim mruby heap after each request to prevent memory growth
+      mruby.gc();
+
+      return response;
+      }); // end withMrubyLock
+
     } catch (error) {
-      console.error('Homura error:', error);
+      console.error(JSON.stringify({
+        event: 'homura_request_error',
+        request_id: requestId,
+        path: url.pathname,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      }));
       return new Response(
         JSON.stringify({
           error: 'Internal Server Error',

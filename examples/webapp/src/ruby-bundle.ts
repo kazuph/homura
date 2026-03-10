@@ -4,97 +4,979 @@
 export const HOMURA_CORE = `# Homura - A Hono-like Ruby DSL for Cloudflare Workers
 # This file is the framework core - users don't need to modify this
 
+class ContinueRequest < StandardError
+end
+
+class HTTPException < StandardError
+  attr_reader :status, :cause
+
+  def initialize(status = 500, opts = {})
+    @status = status
+    @cause = opts[:cause]
+    @custom_response = opts[:res]
+    super(opts[:message] || default_message(status))
+  end
+
+  def get_response
+    if @custom_response
+      @custom_response
+    else
+      {
+        status: @status,
+        body: message,
+        headers: { "Content-Type" => "text/plain" },
+      }
+    end
+  end
+
+  private
+
+  def default_message(status)
+    case status
+    when 400 then "Bad Request"
+    when 401 then "Unauthorized"
+    when 403 then "Forbidden"
+    when 404 then "Not Found"
+    when 405 then "Method Not Allowed"
+    when 409 then "Conflict"
+    when 413 then "Payload Too Large"
+    when 422 then "Unprocessable Entity"
+    when 429 then "Too Many Requests"
+    when 500 then "Internal Server Error"
+    when 502 then "Bad Gateway"
+    when 503 then "Service Unavailable"
+    else "HTTP Error #{status}"
+    end
+  end
+end
+
+\$homura_pending_continue_context = nil
+
 class Homura
-  def initialize
+  VERSION = 2
+
+  def initialize(opts = {})
     @routes = {}
     @not_found = nil
+    @method_not_allowed = nil
+    @on_error = nil
+    @middleware = []
+    @route_middleware = Hash.new { |h, k| h[k] = [] }
+    @after = []
+    @route_after = Hash.new { |h, k| h[k] = [] }
+    @base_path = ""
+    @sub_apps = []
+    @strict = opts.key?(:strict) ? opts[:strict] : true
   end
 
-  def get(path, &block)
-    @routes[["GET", path]] = block
+  # Middleware registration: use { |ctx, nxt| nxt.call }
+  # - Global: use { ... }
+  # - Route scoped: use "/users/:id" { ... }
+  def use(*args, &block)
+    raise ArgumentError, 'use requires a block' unless block_given?
+
+    if args.empty?
+      @middleware << block
+      return
+    end
+
+    if args.length == 1 && args[0].is_a?(String)
+      @route_middleware[["ALL", args[0]]] << block
+      return
+    end
+
+    raise ArgumentError, 'use first arg must be a route path string or omitted'
   end
 
-  def post(path, &block)
-    @routes[["POST", path]] = block
+  def after(*args, &block)
+    raise ArgumentError, 'after requires a block' unless block_given?
+
+    if args.empty?
+      @after << block
+      return
+    end
+
+    if args.length == 1 && args[0].is_a?(String)
+      @route_after[["ALL", args[0]]] << block
+      return
+    end
+
+    raise ArgumentError, 'after first arg must be a route path string or omitted'
   end
 
-  def put(path, &block)
-    @routes[["PUT", path]] = block
+  def on_error(&block)
+    raise ArgumentError, 'on_error requires a block' unless block_given?
+    @on_error = block
   end
 
-  def patch(path, &block)
-    @routes[["PATCH", path]] = block
+  def get(path, *middlewares, &block)
+    raise ArgumentError, 'route block required' unless block_given?
+    @routes[["GET", path]] = {
+      handler: block,
+      middleware: middlewares,
+    }
+    self
   end
 
-  def delete(path, &block)
-    @routes[["DELETE", path]] = block
+  def post(path, *middlewares, &block)
+    raise ArgumentError, 'route block required' unless block_given?
+    @routes[["POST", path]] = {
+      handler: block,
+      middleware: middlewares,
+    }
+    self
+  end
+
+  def put(path, *middlewares, &block)
+    raise ArgumentError, 'route block required' unless block_given?
+    @routes[["PUT", path]] = {
+      handler: block,
+      middleware: middlewares,
+    }
+    self
+  end
+
+  def patch(path, *middlewares, &block)
+    raise ArgumentError, 'route block required' unless block_given?
+    @routes[["PATCH", path]] = {
+      handler: block,
+      middleware: middlewares,
+    }
+    self
+  end
+
+  def delete(path, *middlewares, &block)
+    raise ArgumentError, 'route block required' unless block_given?
+    @routes[["DELETE", path]] = {
+      handler: block,
+      middleware: middlewares,
+    }
+    self
+  end
+
+  def options(path, *middlewares, &block)
+    raise ArgumentError, 'route block required' unless block_given?
+    @routes[["OPTIONS", path]] = {
+      handler: block,
+      middleware: middlewares,
+    }
+    self
+  end
+
+  def all(path, *middlewares, &block)
+    raise ArgumentError, 'route block required' unless block_given?
+    @routes[["ALL", path]] = {
+      handler: block,
+      middleware: middlewares,
+    }
+    self
+  end
+
+  def on(methods, path, *middlewares, &block)
+    raise ArgumentError, 'route block required' unless block_given?
+    methods_list = methods.is_a?(Array) ? methods : [methods]
+    methods_list.each do |m|
+      @routes[[m.to_s.upcase, path]] = {
+        handler: block,
+        middleware: middlewares,
+      }
+    end
+    self
+  end
+
+  def route(path, sub_app)
+    @sub_apps << { path: path.chomp("/"), app: sub_app }
+    self
+  end
+
+  def mount(path, other_app)
+    route(path, other_app)
+  end
+
+  def base_path(prefix = nil)
+    return @base_path if prefix.nil?
+    @base_path = prefix.chomp("/")
+    self
+  end
+
+  def request(method, path, opts = {})
+    env = {
+      request: {
+        method: method.to_s.upcase,
+        path: path,
+        url: opts[:url] || "",
+        query: opts[:query] || {},
+        headers: opts[:headers] || {},
+        body: opts[:body] || "",
+        content_type: opts[:content_type] || (opts[:headers] || {})["Content-Type"] || "",
+        kv_data: opts[:kv_data] || {},
+      },
+      control: opts[:control] || {},
+    }
+    call(env)
+  end
+
+  # Hono-compatible aliases
+  def fetch(raw_env)
+    call(raw_env)
+  end
+
+  def notFound(&block)
+    not_found(&block)
+  end
+
+  def onError(&block)
+    on_error(&block)
   end
 
   def match_route(method, path)
-    path_parts = path.split("/").reject { |p| p.empty? }
-    @routes.each do |(route_method, pattern), handler|
-      next unless route_method == method
-      pattern_parts = pattern.split("/").reject { |p| p.empty? }
-      next unless pattern_parts.length == path_parts.length
+    effective_path = strip_base_path(path)
+    return nil if effective_path.nil?
 
-      params = {}
-      matched = true
-      pattern_parts.each_with_index do |part, idx|
-        if part.start_with?(":")
-          params[part[1..-1].to_sym] = path_parts[idx]
-        elsif part != path_parts[idx]
-          matched = false
-          break
-        end
+    @routes.each do |(route_method, pattern), route|
+      next unless route_method == method || route_method == "ALL"
+      params = match_path(pattern, effective_path)
+      next unless params
+
+      handler = nil
+      route_middleware = []
+
+      if route.is_a?(Hash)
+        handler = route[:handler] || route["handler"]
+        route_middleware = route[:middleware] || route["middleware"] || []
+      elsif route.respond_to?(:call)
+        handler = route
       end
 
-      return [handler, params] if matched
+      next unless handler
+      return [handler, route_middleware, params, pattern]
     end
+
+    @sub_apps.each do |entry|
+      prefix = entry[:path]
+      sub = entry[:app]
+      if effective_path == prefix || effective_path.start_with?(prefix + "/")
+        sub_path = effective_path[prefix.length..-1]
+        sub_path = "/" if sub_path.nil? || sub_path.empty?
+        result = sub.match_route(method, sub_path)
+        return result if result
+      end
+    end
+
     nil
   end
 
-  def call(env)
-    result = match_route(env[:method], env[:path])
-    if result
-      handler, params = result
-      ctx = Context.new(env, params)
-      response = handler.call(ctx)
-      response[:kv_ops] = ctx.kv_ops if ctx.kv_ops && !ctx.kv_ops.empty?
-      response
-    else
-      if @not_found
-        ctx = Context.new(env, {})
-        response = @not_found.call(ctx)
-        response[:kv_ops] = ctx.kv_ops if ctx.kv_ops && !ctx.kv_ops.empty?
-        response
-      else
-        { status: 404, body: "Not Found", headers: {} }
-      end
+  def match_route_for_methods(path)
+    effective_path = strip_base_path(path)
+    return [] if effective_path.nil?
+
+    found = []
+    @routes.each do |(route_method, pattern), _|
+      params = match_path(pattern, effective_path)
+      next unless params
+      found << [route_method, pattern, params] unless route_method == "ALL"
     end
+    found
+  end
+
+  def call(raw_env)
+    env = normalize_env(raw_env)
+    method = env[:method] || ""
+    path = env[:path] || "/"
+    request = create_context(env, {})
+    after_callbacks = @after
+    \$homura_pending_continue_context = nil
+
+    begin
+      matched = match_route(method, path)
+
+      response = if matched
+        handler, route_middleware, params, pattern = matched
+        request = create_context(env, params)
+        request.req.route_path = pattern
+        after_callbacks = collect_after(method, pattern)
+        run_request_pipeline(request, method, path, pattern, handler, route_middleware, after_callbacks)
+      else
+        run_middleware(request, @middleware, lambda {
+          alternatives = match_route_for_methods(path)
+          if !alternatives.empty?
+            run_method_not_allowed(request, alternatives)
+          elsif @not_found
+            run_not_found_handler(request)
+          else
+            { status: 404, body: "Not Found", headers: {} }
+          end
+        })
+      end
+
+      with_protocol_version(response)
+    rescue ContinueRequest
+      context = \$homura_pending_continue_context || request
+      \$homura_pending_continue_context = nil
+      handle_continue_request(context)
+    rescue => e
+      \$homura_pending_continue_context = nil
+      handle_error(e, request, after_callbacks)
+    ensure
+      \$homura_pending_continue_context = nil
+    end
+  end
+
+  def call_with_rescue(raw_env)
+    call(raw_env)
+  rescue ContinueRequest
+    context = \$homura_pending_continue_context || create_context(normalize_env(raw_env), {})
+    \$homura_pending_continue_context = nil
+    handle_continue_request(context)
+  rescue => e
+    \$homura_pending_continue_context = nil
+    handle_error(e, create_context(normalize_env(raw_env), {}))
   end
 
   def not_found(&block)
     @not_found = block
   end
+
+  def run_not_found(request)
+    response = run_middleware(request, @middleware, lambda {
+      run_not_found_handler(request)
+    })
+    response = run_after(request, response, @after)
+    attach_loop_ops(request, response)
+  end
+
+  def run_not_found_handler(request)
+    call_handler(@not_found, request)
+  end
+
+  def method_not_allowed(&block)
+    @method_not_allowed = block
+  end
+
+  def normalize_env(raw_env)
+    raw = raw_env.is_a?(Hash) ? raw_env : {}
+    request_env = if raw.key?(:request)
+      raw[:request]
+    elsif raw.key?("request")
+      raw["request"]
+    else
+      raw
+    end
+
+    {
+      method: fetch_env_value(request_env, :method, ""),
+      path: fetch_env_value(request_env, :path, "/"),
+      url: fetch_env_value(request_env, :url, ""),
+      query: fetch_env_value(request_env, :query, {}),
+      headers: fetch_env_value(request_env, :headers, {}),
+      body: fetch_env_value(request_env, :body, ""),
+      content_type: fetch_env_value(request_env, :content_type, ""),
+      kv_data: fetch_env_value(request_env, :kv_data, {}),
+      control: fetch_env_value(raw, :control, {}),
+    }
+  end
+
+  def fetch_env_value(env, key, default = nil)
+    return default if env.nil? || !env.is_a?(Hash)
+    return env[key] if env.key?(key)
+    return env[key.to_s] if env.key?(key.to_s)
+    default
+  end
+
+  def with_protocol_version(response)
+    return {
+      "v" => VERSION,
+      "status" => 500,
+      "body" => "Internal Server Error",
+      "headers" => { "Content-Type" => "text/plain" },
+    } unless response.is_a?(Hash)
+
+    normalized = {}
+    response.each do |k, v|
+      next if k.nil?
+      normalized[k.to_s] = v
+    end
+
+    status = parse_status(response)
+    status = 500 unless status.between?(100, 599)
+    normalized["status"] = status
+    normalized["body"] = "" if normalized["body"].nil?
+    normalized["headers"] ||= {}
+    normalized["v"] = VERSION
+    normalized
+  end
+
+  private
+
+  def create_context(env, params)
+    Context.new(env, params)
+  end
+
+  def strip_base_path(path)
+    return path if @base_path.nil? || @base_path.empty?
+    if path == @base_path || path.start_with?(@base_path + "/")
+      rest = path[@base_path.length..-1]
+      rest = "/" if rest.nil? || rest.empty?
+      rest
+    else
+      nil
+    end
+  end
+
+  def match_path(pattern, path)
+    if @strict
+      path_trailing = path.end_with?("/") && path.length > 1
+      pattern_trailing = pattern.end_with?("/") && pattern.length > 1
+      return nil if path_trailing != pattern_trailing && !pattern.include?("*") && !pattern.include?("?")
+    end
+    path_parts = path.split("/").reject { |p| p.empty? }
+    pattern_parts = pattern.split("/").reject { |p| p.empty? }
+
+    params = {}
+    pi = 0
+
+    pattern_parts.each_with_index do |part, idx|
+      if part == "*"
+        params[:_wildcard] = "/" + path_parts[pi..-1].join("/")
+        return params
+      end
+
+      if part.start_with?(":") && part.end_with?("?")
+        param_name = part[1..-2]
+        if pi < path_parts.length
+          params[param_name.to_sym] = path_parts[pi]
+          pi += 1
+        end
+      elsif part.start_with?(":") && part.include?("{") && part.end_with?("}")
+        brace_start = part.index("{")
+        param_name = part[1...brace_start]
+        regex_str = part[(brace_start + 1)..-2]
+        return nil if pi >= path_parts.length
+        regex = Regexp.new("\\\\A#{regex_str}\\\\z")
+        return nil unless regex.match(path_parts[pi])
+        params[param_name.to_sym] = path_parts[pi]
+        pi += 1
+      elsif part.start_with?(":")
+        return nil if pi >= path_parts.length
+        params[part[1..-1].to_sym] = path_parts[pi]
+        pi += 1
+      else
+        return nil if pi >= path_parts.length
+        return nil if part != path_parts[pi]
+        pi += 1
+      end
+    end
+
+    return nil unless pi == path_parts.length
+    params
+  end
+
+  def collect_middleware(method, pattern, route_middleware)
+    middlewares = []
+    middlewares.concat(@middleware)
+    middlewares.concat(route_middleware || [])
+    middlewares.concat(@route_middleware[["ALL", pattern]] || [])
+    middlewares.concat(@route_middleware[[method, pattern]] || [])
+    middlewares
+  end
+
+  def collect_after(method, pattern)
+    afters = []
+    afters.concat(@after)
+    afters.concat(@route_after[["ALL", pattern]] || [])
+    afters.concat(@route_after[[method, pattern]] || [])
+    afters
+  end
+
+  def run_request_pipeline(request, method, path, pattern, handler, route_middleware, after_callbacks)
+    response = run_middleware(request, collect_middleware(method, pattern, route_middleware), lambda {
+      call_handler(handler, request)
+    })
+    response = run_after(request, response, after_callbacks)
+    attach_loop_ops(request, response)
+  end
+
+  def attach_loop_ops(request, response)
+    return response unless response.is_a?(Hash)
+
+    if response.is_a?(Hash) && request.kv_ops && !request.kv_ops.empty?
+      response["kv_ops"] = request.kv_ops
+    end
+    if request.d1_ops && !request.d1_ops.empty?
+      response["d1_ops"] = request.d1_ops.map do |op|
+        next unless op.is_a?(Hash)
+        next_op = {}
+        op.each do |key, value|
+          next_op[key.to_s] = value
+        end
+        next_op
+      end.compact
+    end
+    response
+  end
+
+  def run_method_not_allowed(request, alternatives)
+    methods = alternatives.map { |entry| entry[0] }
+    allow = methods.uniq
+    if @method_not_allowed
+      payload = {
+        methods: allow,
+        path: request.req.path,
+      }
+
+      if @method_not_allowed.arity == 0
+        response = @method_not_allowed.call
+      elsif @method_not_allowed.arity >= 2
+        response = @method_not_allowed.call(payload, request)
+      else
+        response = @method_not_allowed.call(request)
+      end
+    else
+      response = { status: 405, body: "Method Not Allowed", headers: { "Allow" => allow.join(",") } }
+    end
+
+    response = attach_allow_header(response, allow)
+    response = run_after(request, response, @after)
+    attach_loop_ops(request, response)
+  rescue => e
+    response = { status: 405, body: "Method Not Allowed", headers: { "Allow" => allow.join(",") } }
+    response
+  end
+
+  def attach_allow_header(response, methods)
+    return unless response.is_a?(Hash)
+
+    headers = response["headers"] || response[:headers] || {}
+    headers = {} unless headers.is_a?(Hash)
+    headers = headers.dup
+    headers["Allow"] = methods.join(",")
+    response["headers"] = headers
+    response
+  end
+
+  def handle_error(error, request, after_callbacks = @after)
+    response = if @on_error
+      if @on_error.arity == 0
+        @on_error.call
+      elsif @on_error.arity == 1
+        @on_error.call(error)
+      else
+        @on_error.call(error, request)
+      end
+    elsif error.is_a?(HTTPException)
+      error.get_response
+    else
+      {
+        "status" => 500,
+        "body" => { "error" => "#{error.class}: #{error.message}", "backtrace" => (error.backtrace || []).first(20) },
+        "headers" => { "Content-Type" => "application/json" },
+      }
+    end
+
+    unless response.is_a?(Hash)
+      response = {
+        "status" => 500,
+        "body" => "Internal Server Error",
+        "headers" => { "Content-Type" => "text/plain" },
+      }
+    end
+
+    response = response.dup
+    response["headers"] ||= {}
+    response["headers"]["X-Homura-Error"] = error.class.to_s
+    if request.is_a?(Context)
+      response = run_after(request, response, after_callbacks)
+      attach_loop_ops(request, response)
+    end
+    with_protocol_version(response)
+  rescue => fallback
+    response = {
+      "status" => 500,
+      "body" => fallback.message,
+      "headers" => {
+        "Content-Type" => "text/plain",
+        "X-Homura-Error" => error.class.to_s,
+      },
+    }
+
+    if request.is_a?(Context)
+      response = run_after(request, response, after_callbacks)
+      attach_loop_ops(request, response)
+    end
+
+    with_protocol_version(response)
+  end
+
+  def handle_continue_request(request)
+    response = {
+      "status" => 200,
+      "body" => "",
+      "headers" => {},
+      "control" => { "continue" => true, "ops" => [] },
+    }
+    attach_loop_ops(request, response) if request.is_a?(Context)
+    with_protocol_version(response)
+  end
+
+  def run_after(request, response, callbacks)
+    current = response
+    callbacks.each do |after_hook|
+      result = if after_hook.arity < 0 || after_hook.arity >= 2
+        after_hook.call(request, current)
+      else
+        after_hook.call(request)
+      end
+      current = result unless result.nil?
+    end
+    current
+  end
+
+  def run_middleware(request, middleware, final_handler)
+    chain = middleware.dup
+    run_next = nil
+    run_next = lambda {
+      if chain.empty?
+        final_handler.call
+      else
+        mw = chain.shift
+        if mw.arity >= 2 || mw.arity < 0
+          mw.call(request, run_next)
+        else
+          mw.call(request)
+        end
+      end
+    }
+    run_next.call
+  end
+
+  def call_handler(handler, request)
+    current = handler
+    if current.is_a?(Hash)
+      nested = current[:handler] || current["handler"]
+      current = nested unless nested.nil?
+    end
+
+    unless current.respond_to?(:call)
+      return {
+        "status" => 500,
+        "headers" => { "Content-Type" => "text/plain" },
+        "body" => "Route handler is not callable",
+      }
+    end
+
+    return current.call if current.arity == 0
+    current.call(request)
+  end
+
+  def parse_status(response)
+    status = response["status"] if response.is_a?(Hash)
+    status = response[:status] if status.nil? && response.is_a?(Hash)
+    return 500 unless status
+    status = status.to_i
+    return status if status.between?(100, 599)
+    500
+  end
+end
+
+class RequestContext
+  attr_accessor :route_path, :matched_routes
+
+  def initialize(raw_env, params = {})
+    @env = raw_env.is_a?(Hash) ? raw_env : {}
+    @params = params || {}
+    @route_path = nil
+    @matched_routes = []
+    @validated_data = {}
+  end
+
+  def method
+    fetch_env_value(@env, :method, "")
+  end
+
+  def path
+    fetch_env_value(@env, :path, "/")
+  end
+
+  def query(name = nil)
+    query_value = fetch_env_value(@env, :query, {})
+    return query_value if name.nil?
+    query_value.is_a?(Hash) ? query_value[name.to_s] : nil
+  end
+
+  def header(name = nil, default = nil)
+    headers = fetch_env_value(@env, :headers, {})
+    return headers if name.nil?
+    return default unless headers.is_a?(Hash)
+
+    key = name.to_s.downcase
+    direct = headers[name]
+    direct = direct.to_s unless direct.nil?
+    direct = headers[name.to_s] unless headers.key?(name) || headers.key?(name.to_s)
+    return direct unless direct.nil?
+
+    exact = headers[name.to_sym]
+    return exact unless exact.nil?
+
+    headers.each do |candidate_key, candidate_value|
+      if candidate_key.to_s.downcase == key
+        return candidate_value
+      end
+    end
+
+    default
+  end
+
+  def json
+    body = text
+    return {} if body.nil? || body.empty?
+    parse_json(body)
+  end
+
+  def text
+    fetch_env_value(@env, :body, "")
+  end
+
+  def param(name = nil, default = nil)
+    return @params if name.nil?
+    @params[name.to_sym] || @params[name.to_s] || default
+  end
+
+  def url
+    fetch_env_value(@env, :url, "")
+  end
+
+  def parse_body
+    content_type = fetch_env_value(@env, :content_type, "")
+    body_str = text
+    return {} if body_str.nil? || body_str.empty?
+
+    if content_type.include?("application/x-www-form-urlencoded")
+      parse_urlencoded(body_str)
+    elsif content_type.include?("application/json")
+      json
+    else
+      { body_str => nil }
+    end
+  end
+
+  def valid(target = nil)
+    return @validated_data if target.nil?
+    @validated_data[target.to_s]
+  end
+
+  def add_validated_data(target, data)
+    @validated_data[target.to_s] = data
+  end
+
+  def queries(name = nil)
+    query_value = fetch_env_value(@env, :query, {})
+    return query_value if name.nil?
+    return nil unless query_value.is_a?(Hash)
+    val = query_value[name.to_s]
+    val.is_a?(Array) ? val : (val.nil? ? nil : [val])
+  end
+
+  def headers
+    fetch_env_value(@env, :headers, {})
+  end
+
+  private
+
+  def fetch_env_value(env, key, default = nil)
+    return default if env.nil? || !env.is_a?(Hash)
+    return env[key] if env.key?(key)
+    return env[key.to_s] if env.key?(key.to_s)
+    default
+  end
+
+  def parse_urlencoded(str)
+    result = {}
+    str.split("&").each do |pair|
+      eq = pair.index("=")
+      if eq
+        key = url_decode(pair[0...eq])
+        val = url_decode(pair[(eq + 1)..-1])
+      else
+        key = url_decode(pair)
+        val = ""
+      end
+      result[key] = val
+    end
+    result
+  end
+
+  def url_decode(str)
+    out = ""
+    i = 0
+    while i < str.length
+      if str[i] == "+"
+        out << " "
+        i += 1
+      elsif str[i] == "%" && i + 2 < str.length
+        hex = str[i + 1, 2]
+        out << hex.to_i(16).chr
+        i += 3
+      else
+        out << str[i]
+        i += 1
+      end
+    end
+    out
+  end
 end
 
 class Context
-  attr_reader :params, :env
+  attr_reader :params, :env, :req, :res, :var, :d1_ops
 
   def initialize(env, params)
     @env = env
-    @params = params
+    @params = params || {}
+    @req = RequestContext.new(env, @params)
+    @var = {}
+    @res = {
+      status: nil,
+      headers: {},
+      type: nil,
+      template: nil,
+      props: nil,
+    }
     @kv_ops = []
+    @d1_ops = []
+    control = fetch_env_value(@env, :control, {})
+    control_ops = control.is_a?(Hash) ? (control[:ops] || control["ops"]) : nil
+    @d1_results = control_ops.is_a?(Array) ? control_ops : []
+    @d1_cursor = 0
   end
 
-  def body
-    @env[:body] || ""
+  def set(key, value)
+    @var[key.to_s] = value
+  end
+
+  def get(key)
+    @var[key.to_s]
+  end
+
+  def body(data = nil, status: nil, headers: {})
+    if data.nil?
+      return @req.text || ""
+    end
+    response_with_status(
+      status: status,
+      headers: response_headers(headers),
+      body: data,
+    )
+  end
+
+  def not_found
+    { status: 404, body: "Not Found", headers: response_headers({ "Content-Type" => "text/plain" }) }
+  end
+
+  def new_response(body = nil, status_code = nil, headers_hash = {})
+    {
+      status: status_code || response_status,
+      headers: response_headers(headers_hash),
+      body: body || "",
+    }
+  end
+
+  def set_renderer(&block)
+    @renderer = block
+  end
+
+  def render(content, *args)
+    if @renderer
+      @renderer.call(content, *args)
+    else
+      html(content.to_s)
+    end
+  end
+
+  def cookie(name)
+    cookies = parse_cookies
+    cookies[name.to_s]
+  end
+
+  def set_cookie(name, value, opts = {})
+    parts = ["#{name}=#{value}"]
+    parts << "Path=#{opts[:path]}" if opts[:path]
+    parts << "Domain=#{opts[:domain]}" if opts[:domain]
+    parts << "Max-Age=#{opts[:max_age]}" if opts[:max_age]
+    parts << "Expires=#{opts[:expires]}" if opts[:expires]
+    parts << "HttpOnly" if opts[:http_only]
+    parts << "Secure" if opts[:secure]
+    parts << "SameSite=#{opts[:same_site]}" if opts[:same_site]
+    @res[:headers]["Set-Cookie"] = parts.join("; ")
+    self
+  end
+
+  def delete_cookie(name, opts = {})
+    set_cookie(name, "", path: opts[:path] || "/", max_age: 0)
+  end
+
+  def fetch_env_value(env, key, default = nil)
+    return default if env.nil? || !env.is_a?(Hash)
+    return env[key] if env.key?(key)
+    return env[key.to_s] if env.key?(key.to_s)
+    return default
+  end
+
+  def db
+    @db ||= D1Client.new(self)
   end
 
   def json_body
-    body_str = body
-    return {} if body_str.nil? || body_str.empty?
-    body_str
+    @req.json
+  end
+
+  # Response helpers
+  def status(code)
+    @res[:status] = code.to_i
+    self
+  end
+
+  def header(name, value = nil, opts = {})
+    if value.nil?
+      @res[:headers][name.to_s]
+    else
+      key = name.to_s
+      if opts[:append] && @res[:headers][key]
+        @res[:headers][key] = @res[:headers][key] + ", " + value.to_s
+      else
+        @res[:headers][key] = value.to_s
+      end
+      self
+    end
+  end
+
+  def response_status(explicit = nil)
+    status = explicit || @res[:status]
+    return 200 unless status
+    status = status.to_i
+    return status if status.between?(100, 599)
+    200
+  end
+
+  def response_headers(base_headers = {})
+    headers = {}
+    @res[:headers].each do |key, value|
+      headers[key.to_s] = value.to_s if !key.nil?
+    end
+    base_headers.each do |key, value|
+      headers[key.to_s] = value.to_s if !key.nil?
+    end
+    headers
+  end
+
+  def response_with_status(status:, headers:, body:, type: nil, template: nil, props: nil)
+    response = {
+      status: response_status(status),
+      headers: headers,
+      body: body,
+    }
+    response[:type] = type unless type.nil?
+    response[:template] = template unless template.nil?
+    response[:props] = props unless props.nil?
+    response
   end
 
   # KV operations
@@ -115,28 +997,668 @@ class Context
     @kv_ops
   end
 
+  def request_d1(op, sql = nil, binds = [], statements = nil)
+    result = next_d1_result(op)
+    return result unless result.equal?(D1_PENDING_RESULT)
+
+    op_entry = build_d1_entry(op, sql, binds, statements)
+    @d1_ops << op_entry
+    \$homura_pending_continue_context = self
+    raise ContinueRequest, "Homura request requires continuation"
+  end
+
+  def d1_ops
+    @d1_ops
+  end
+
+  def run_d1_batch(statements)
+    request_d1("batch", nil, [], statements)
+  end
+
+  def run_d1_transaction(statements)
+    request_d1("transaction", nil, [], statements)
+  end
+
   # Response helpers
-  def json(data, status: 200)
-    { status: status, body: data, headers: { "Content-Type" => "application/json" } }
+  def json(data, status: nil)
+    response_with_status(
+      status: status,
+      headers: response_headers({ "Content-Type" => "application/json" }),
+      body: data,
+    )
   end
 
-  def text(body, status: 200)
-    { status: status, body: body, headers: { "Content-Type" => "text/plain" } }
+  def text(body, status: nil)
+    response_with_status(
+      status: status,
+      headers: response_headers({ "Content-Type" => "text/plain" }),
+      body: body,
+    )
   end
 
-  def html(body, status: 200)
-    { status: status, body: body, headers: { "Content-Type" => "text/html" } }
+  def html(body, status: nil)
+    response_with_status(
+      status: status,
+      headers: response_headers({ "Content-Type" => "text/html" }),
+      body: body,
+    )
   end
 
-  def jsx(template, props = {}, status: 200)
-    { status: status, type: "jsx", template: template, props: props, headers: { "Content-Type" => "text/html" } }
+  def jsx(template, props = {}, status: nil)
+    normalized_props = {}
+    if props.is_a?(Hash)
+      props.each do |key, value|
+        normalized_props[key.to_s] = value
+      end
+    end
+
+    response_with_status(
+      status: status,
+      headers: response_headers({ "Content-Type" => "text/html" }),
+      type: "jsx",
+      template: template,
+      props: normalized_props,
+      body: nil,
+    )
   end
 
-  def css(body, status: 200, max_age: 0, etag: nil)
-    headers = { "Content-Type" => "text/css" }
+  def css(body, status: nil, max_age: 0, etag: nil)
+    headers = response_headers({ "Content-Type" => "text/css" })
     headers["Cache-Control"] = "public, max-age=#{max_age}" if max_age && max_age > 0
     headers["ETag"] = etag if etag
-    { status: status, body: body, headers: headers }
+    response_with_status(
+      status: status,
+      headers: headers,
+      body: body,
+    )
+  end
+
+  def redirect(path, status: nil)
+    response_with_status(
+      status: status || @res[:status] || 302,
+      headers: response_headers({ "Location" => path, "Content-Type" => "text/plain" }),
+      body: "",
+    )
+  end
+
+  def route_path
+    @env[:path] || "/"
+  end
+
+  def route_method
+    @env[:method] || ""
+  end
+
+  private
+
+  def parse_cookies
+    cookie_header = @req.header("Cookie")
+    return {} if cookie_header.nil? || cookie_header.empty?
+    result = {}
+    cookie_header.split(";").each do |pair|
+      pair = pair.strip
+      eq = pair.index("=")
+      next unless eq
+      key = pair[0...eq].strip
+      val = pair[(eq + 1)..-1].strip
+      result[key] = val
+    end
+    result
+  end
+
+  D1_PENDING_RESULT = :__homura_d1_pending__
+
+  def next_d1_result(expected_op)
+    results = fetch_env_value(@env, :control, {})
+    ops = results.is_a?(Hash) ? (results[:ops] || results["ops"]) : nil
+    list = ops.is_a?(Array) ? ops : []
+
+    while @d1_cursor < list.length
+      next_result = list[@d1_cursor]
+      @d1_cursor += 1
+      next unless next_result.is_a?(Hash)
+
+      op = next_result["op"] || next_result[:op]
+      kind = next_result["kind"] || next_result[:kind]
+      next unless kind == "d1" || kind.nil? && ["all", "first", "get", "run", "exec", "batch", "transaction"].include?(op.to_s)
+      unless d1_op_matches?(expected_op, op)
+        raise RuntimeError, "Unexpected D1 result order: expected #{expected_op}, got #{op}"
+      end
+
+      ok = next_result["ok"] || next_result[:ok]
+      if ok == false || ok == "false"
+        raise RuntimeError, normalize_d1_error(next_result)
+      end
+
+      payload = next_result["result"] || next_result[:result]
+      return normalize_d1_payload(expected_op, payload)
+    end
+
+    D1_PENDING_RESULT
+  end
+
+  def run_d1_op(op, sql, binds)
+    request_d1(op, sql, binds, nil)
+  end
+
+  def d1_op_matches?(expected_op, actual_op)
+    expected = expected_op.to_s
+    actual = actual_op.to_s
+    return true if expected == actual
+    return true if expected == "get" && actual == "first"
+    return true if expected == "first" && actual == "get"
+    false
+  end
+
+  def build_d1_entry(op, sql, binds, statements)
+    if statements
+      normalized_statements = statements.map do |statement|
+        next unless statement.is_a?(Hash)
+        {
+          op: statement[:op] || statement["op"],
+          sql: normalize_d1_sql(statement[:sql] || statement["sql"]),
+          binds: normalize_d1_binds(statement[:binds] || statement["binds"]),
+        }
+      end.compact
+      { op: op, statements: normalized_statements }
+    else
+      { op: op, sql: normalize_d1_sql(sql), binds: normalize_d1_binds(binds) }
+    end
+  end
+
+  def normalize_d1_sql(sql)
+    return nil if sql.nil?
+    String.new(sql.to_s)
+  end
+
+  def normalize_d1_payload(expected_op, payload)
+    return payload unless expected_op.is_a?(String)
+
+    data = payload
+    if expected_op == "get" || expected_op == "first"
+      if data.is_a?(Array)
+        return data[0]
+      end
+      if data.is_a?(Hash)
+        return data["result"] || data["results"] || data[:result] || data[:results] || data
+      end
+      return data
+    end
+
+    if expected_op == "all" && data.is_a?(Hash)
+      rows = data["results"] || data[:results]
+      return rows.is_a?(Array) ? rows : []
+    end
+
+    return data if expected_op == "exec" || expected_op == "run" || expected_op == "all" || expected_op == "batch" || expected_op == "transaction"
+    data
+  end
+
+  def normalize_d1_binds(raw_bind)
+    return [] if raw_bind.nil?
+    unless raw_bind.is_a?(Array)
+      raise ArgumentError, "D1 bind parameters must be an array"
+    end
+    raw_bind.map { |value| normalize_d1_bind_value(value) }
+  end
+
+  def normalize_d1_bind_value(value)
+    return nil if value.nil?
+    return true if value == true
+    return false if value == false
+    return value if value.is_a?(Integer) || value.is_a?(Float)
+    return String.new(value.to_s) if value.is_a?(String) || value.is_a?(Symbol)
+    raise ArgumentError, "D1 bind parameters must be scalar values"
+  end
+
+  def normalize_d1_error(result)
+    return "Unknown database error" unless result.is_a?(Hash)
+    message = result["error"] || result[:error]
+    if message.nil? && result["meta"].is_a?(Hash)
+      message = result["meta"]["error"]
+    end
+    if message.nil? && result[:meta].is_a?(Hash)
+      message = result[:meta][:error]
+    end
+    return message.is_a?(String) && !message.empty? ? message : "Unknown database error"
+  end
+end
+
+class D1Client
+  def initialize(context)
+    @context = context
+  end
+
+  def get(sql, binds = nil)
+    @context.request_d1("get", sql, binds || [])
+  end
+
+  def all(sql, binds = nil)
+    @context.request_d1("all", sql, binds || [])
+  end
+
+  def first(sql, binds = nil)
+    @context.request_d1("first", sql, binds || [])
+  end
+
+  def run(sql, binds = nil)
+    result = @context.request_d1("run", sql, binds || [])
+    result.is_a?(Hash) ? result : {}
+  end
+
+  def exec(sql)
+    @context.request_d1("exec", sql)
+  end
+
+  def batch(statements)
+    parsed = normalize_statements(statements)
+    @context.run_d1_batch(parsed)
+  end
+
+  def transaction(statements)
+    parsed = normalize_statements(statements)
+    @context.run_d1_transaction(parsed)
+  end
+
+  private
+
+  def normalize_statements(statements)
+    list = statements.is_a?(Array) ? statements : []
+    list.map do |entry|
+      next unless entry.is_a?(Hash)
+      {
+        op: entry[:op] || entry["op"],
+        sql: entry[:sql] || entry["sql"],
+        binds: normalize_binds(entry[:binds] || entry["binds"]),
+      }
+    end.compact
+  end
+
+  def normalize_binds(raw)
+    return [] if raw.nil?
+    return raw if raw.is_a?(Array)
+    raise ArgumentError, "D1 bind parameters must be an array"
+  end
+end
+
+module Homura::Middleware
+  def self.cors(opts = {})
+    origin = opts[:origin] || "*"
+    methods = opts[:allow_methods] || "GET,HEAD,PUT,POST,DELETE,PATCH"
+    headers = opts[:allow_headers] || "*"
+    expose = opts[:expose_headers] || ""
+    max_age = opts[:max_age]
+    credentials = opts[:credentials] || false
+
+    lambda do |ctx, nxt|
+      ctx.header("Access-Control-Allow-Origin", origin.to_s)
+      ctx.header("Access-Control-Allow-Methods", methods.to_s) if ctx.req.method == "OPTIONS"
+      ctx.header("Access-Control-Allow-Headers", headers.to_s) if ctx.req.method == "OPTIONS"
+      ctx.header("Access-Control-Expose-Headers", expose.to_s) unless expose.empty?
+      ctx.header("Access-Control-Max-Age", max_age.to_s) if max_age
+      ctx.header("Access-Control-Allow-Credentials", "true") if credentials
+
+      if ctx.req.method == "OPTIONS"
+        ctx.status(204)
+        { status: 204, body: "", headers: ctx.response_headers({}) }
+      else
+        nxt.call
+      end
+    end
+  end
+
+  def self.logger(opts = {})
+    output = opts[:output]
+    lambda do |ctx, nxt|
+      start = Time.now rescue nil
+      response = nxt.call
+      elapsed = start ? ((Time.now - start) * 1000).round(1) : 0
+      status = response.is_a?(Hash) ? (response[:status] || response["status"] || 200) : 200
+      msg = "#{ctx.req.method} #{ctx.req.path} #{status} #{elapsed}ms"
+      if output && output.respond_to?(:call)
+        output.call(msg)
+      end
+      response
+    end
+  end
+
+  def self.basic_auth(opts = {})
+    username = opts[:username]
+    password = opts[:password]
+    verify = opts[:verify]
+    realm = opts[:realm] || "Secure Area"
+
+    lambda do |ctx, nxt|
+      auth = ctx.req.header("Authorization")
+      authorized = false
+
+      if auth && auth.start_with?("Basic ")
+        decoded = base64_decode(auth[6..-1])
+        if decoded
+          parts = decoded.split(":", 2)
+          if parts.length == 2
+            if verify
+              authorized = verify.call(parts[0], parts[1])
+            else
+              authorized = (parts[0] == username && parts[1] == password)
+            end
+          end
+        end
+      end
+
+      if authorized
+        nxt.call
+      else
+        {
+          status: 401,
+          body: "Unauthorized",
+          headers: ctx.response_headers({ "WWW-Authenticate" => "Basic realm=\\"#{realm}\\"", "Content-Type" => "text/plain" }),
+        }
+      end
+    end
+  end
+
+  def self.bearer_auth(opts = {})
+    token = opts[:token]
+    verify = opts[:verify]
+    realm = opts[:realm] || "token"
+
+    lambda do |ctx, nxt|
+      auth = ctx.req.header("Authorization")
+      authorized = false
+
+      if auth && auth.start_with?("Bearer ")
+        bearer = auth[7..-1]
+        if verify
+          authorized = verify.call(bearer)
+        else
+          authorized = (bearer == token)
+        end
+      end
+
+      if authorized
+        nxt.call
+      else
+        {
+          status: 401,
+          body: "Unauthorized",
+          headers: ctx.response_headers({ "WWW-Authenticate" => "Bearer realm=\\"#{realm}\\"", "Content-Type" => "text/plain" }),
+        }
+      end
+    end
+  end
+
+  def self.powered_by(name = "Homura")
+    lambda do |ctx, nxt|
+      ctx.header("X-Powered-By", name)
+      nxt.call
+    end
+  end
+
+  def self.pretty_json
+    lambda do |ctx, nxt|
+      response = nxt.call
+      if response.is_a?(Hash)
+        ct = (response[:headers] || response["headers"] || {})
+        content_type = ct["Content-Type"] || ct[:content_type] || ""
+        if content_type.include?("application/json") && response[:body].is_a?(Hash)
+          response[:body] = pretty_json_format(response[:body])
+          response["body"] = response[:body]
+        end
+      end
+      response
+    end
+  end
+
+  def self.secure_headers(opts = {})
+    lambda do |ctx, nxt|
+      ctx.header("X-Content-Type-Options", "nosniff")
+      ctx.header("X-Frame-Options", opts[:frame] || "SAMEORIGIN")
+      ctx.header("X-XSS-Protection", "0")
+      ctx.header("Referrer-Policy", opts[:referrer_policy] || "strict-origin-when-cross-origin")
+      ctx.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains") if opts[:hsts] != false
+      nxt.call
+    end
+  end
+
+  def self.request_id(opts = {})
+    header_name = opts[:header] || "X-Request-Id"
+    generator = opts[:generator]
+
+    lambda do |ctx, nxt|
+      id = ctx.req.header(header_name)
+      unless id
+        id = generator ? generator.call : generate_simple_id
+      end
+      ctx.set("request_id", id)
+      ctx.header(header_name, id)
+      nxt.call
+    end
+  end
+
+  def self.etag
+    lambda do |ctx, nxt|
+      response = nxt.call
+      if response.is_a?(Hash) && ctx.req.method == "GET"
+        body = response[:body] || response["body"]
+        if body.is_a?(String) && !body.empty?
+          tag = simple_hash(body)
+          etag_value = "\\"#{tag}\\""
+          headers = response[:headers] || response["headers"] || {}
+          headers["ETag"] = etag_value
+          response[:headers] = headers
+          response["headers"] = headers
+
+          if_none = ctx.req.header("If-None-Match")
+          if if_none == etag_value
+            response[:status] = 304
+            response["status"] = 304
+            response[:body] = ""
+            response["body"] = ""
+          end
+        end
+      end
+      response
+    end
+  end
+
+  def self.body_limit(opts = {})
+    max = opts[:max_size] || 1048576
+
+    lambda do |ctx, nxt|
+      body = ctx.body
+      if body.is_a?(String) && body.length > max
+        {
+          status: 413,
+          body: "Payload Too Large",
+          headers: ctx.response_headers({ "Content-Type" => "text/plain" }),
+        }
+      else
+        nxt.call
+      end
+    end
+  end
+
+  def self.csrf(opts = {})
+    allowed_origins = opts[:origin]
+    allowed_origins = [allowed_origins] if allowed_origins.is_a?(String)
+
+    lambda do |ctx, nxt|
+      method = ctx.req.method
+      unsafe = %w[POST PUT DELETE PATCH].include?(method)
+
+      if unsafe
+        origin = ctx.req.header("Origin")
+        if origin && allowed_origins
+          unless allowed_origins.include?(origin)
+            return {
+              status: 403,
+              body: "Forbidden",
+              headers: ctx.response_headers({ "Content-Type" => "text/plain" }),
+            }
+          end
+        elsif origin
+          req_url = ctx.req.url
+          if !req_url.empty?
+            req_origin = extract_origin(req_url)
+            unless origin == req_origin
+              return {
+                status: 403,
+                body: "Forbidden",
+                headers: ctx.response_headers({ "Content-Type" => "text/plain" }),
+              }
+            end
+          end
+        end
+      end
+
+      nxt.call
+    end
+  end
+
+  def self.ip_restriction(opts = {})
+    deny_list = opts[:deny_list] || []
+    allow_list = opts[:allow_list] || []
+
+    lambda do |ctx, nxt|
+      ip = ctx.req.header("X-Forwarded-For") || ctx.req.header("CF-Connecting-IP") || ""
+      ip = ip.split(",").first.to_s.strip if ip.include?(",")
+
+      if !allow_list.empty?
+        unless allow_list.include?(ip) || allow_list.include?("*")
+          return {
+            status: 403,
+            body: "Forbidden",
+            headers: ctx.response_headers({ "Content-Type" => "text/plain" }),
+          }
+        end
+      end
+
+      if deny_list.include?(ip)
+        return {
+          status: 403,
+          body: "Forbidden",
+          headers: ctx.response_headers({ "Content-Type" => "text/plain" }),
+        }
+      end
+
+      nxt.call
+    end
+  end
+
+  def self.timing(opts = {})
+    total = opts[:total] != false
+    total_desc = opts[:total_description] || "Total Response Time"
+
+    lambda do |ctx, nxt|
+      ctx.set("_timing_start", Time.now) if total
+      ctx.set("_timing_metrics", [])
+      response = nxt.call
+
+      if response.is_a?(Hash)
+        metrics = ctx.get("_timing_metrics") || []
+        if total
+          start = ctx.get("_timing_start")
+          elapsed = start ? ((Time.now - start) * 1000).round(1) : 0
+          metrics << "total;dur=#{elapsed};desc=\\"#{total_desc}\\""
+        end
+        unless metrics.empty?
+          headers = response[:headers] || response["headers"] || {}
+          headers["Server-Timing"] = metrics.join(", ")
+          response[:headers] = headers
+          response["headers"] = headers
+        end
+      end
+
+      response
+    end
+  end
+
+  def self.start_time(ctx, name)
+    ctx.set("_timing_#{name}", Time.now)
+  end
+
+  def self.end_time(ctx, name)
+    start = ctx.get("_timing_#{name}")
+    return unless start
+    elapsed = ((Time.now - start) * 1000).round(1)
+    metrics = ctx.get("_timing_metrics") || []
+    metrics << "#{name};dur=#{elapsed}"
+    ctx.set("_timing_metrics", metrics)
+  end
+
+  def self.set_metric(ctx, name, duration = nil, description = nil)
+    metrics = ctx.get("_timing_metrics") || []
+    parts = [name]
+    parts << "dur=#{duration}" if duration
+    parts << "desc=\\"#{description}\\"" if description
+    metrics << parts.join(";")
+    ctx.set("_timing_metrics", metrics)
+  end
+
+  def self.extract_origin(url)
+    return "" if url.nil? || url.empty?
+    idx = url.index("://")
+    return "" unless idx
+    rest = url[(idx + 3)..-1]
+    slash = rest.index("/")
+    host = slash ? rest[0...slash] : rest
+    "#{url[0..idx + 2]}#{host}"
+  end
+
+  def self.base64_decode(str)
+    return nil if str.nil? || str.empty?
+    table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    out = ""
+    buf = 0
+    bits = 0
+    str.each_byte do |b|
+      c = b.chr
+      next if c == "=" || c == "\\n" || c == "\\r"
+      idx = table.index(c)
+      next if idx.nil?
+      buf = (buf << 6) | idx
+      bits += 6
+      if bits >= 8
+        bits -= 8
+        out << ((buf >> bits) & 0xff).chr
+        buf &= (1 << bits) - 1
+      end
+    end
+    out
+  end
+
+  def self.generate_simple_id
+    chars = "0123456789abcdef"
+    id = ""
+    16.times { id << chars[rand(chars.length)] }
+    id
+  end
+
+  def self.simple_hash(str)
+    h = 0
+    str.each_byte { |b| h = ((h << 5) - h + b) & 0xffffffff }
+    h.to_s(16)
+  end
+
+  def self.pretty_json_format(obj, indent = 0)
+    sp = "  " * indent
+    sp1 = "  " * (indent + 1)
+    case obj
+    when Hash
+      return "{}" if obj.empty?
+      parts = obj.map { |k, v| "#{sp1}\\"#{k}\\": #{pretty_json_format(v, indent + 1)}" }
+      "{\\n#{parts.join(",\\n")}\\n#{sp}}"
+    when Array
+      return "[]" if obj.empty?
+      parts = obj.map { |v| "#{sp1}#{pretty_json_format(v, indent + 1)}" }
+      "[\\n#{parts.join(",\\n")}\\n#{sp}]"
+    when String then "\\"#{obj}\\""
+    when NilClass then "null"
+    when TrueClass then "true"
+    when FalseClass then "false"
+    else obj.to_s
+    end
   end
 end
 
@@ -153,6 +1675,31 @@ module View
       when 39 then out << "&#39;"
       else out << b.chr
       end
+    end
+    out
+  end
+
+  VOID_ELEMENTS = %w[area base br col embed hr img input link meta param source track wbr]
+
+  def self.tag(name, attrs = {}, &block)
+    out = "<#{name}"
+    attrs.each do |k, v|
+      next if v.nil? || v == false
+      if v == true
+        out << " #{k}"
+      else
+        out << " #{k}=\\"#{h(v)}\\""
+      end
+    end
+    if VOID_ELEMENTS.include?(name.to_s)
+      out << " />"
+    elsif block
+      out << ">"
+      content = block.call
+      out << content.to_s if content
+      out << "</#{name}>"
+    else
+      out << "></#{name}>"
     end
     out
   end
@@ -174,70 +1721,335 @@ class Object
   end
 end
 
+def json_number_string?(str)
+  return false if str.nil? || str.empty?
+
+  idx = 0
+  if str[0] == "-"
+    return false if str.length == 1
+    idx = 1
+  end
+
+  digits = 0
+  while idx < str.length && str[idx] >= "0" && str[idx] <= "9"
+    idx += 1
+    digits += 1
+  end
+  return false if digits == 0
+
+  if idx < str.length && str[idx] == "."
+    idx += 1
+    fraction_digits = 0
+    while idx < str.length && str[idx] >= "0" && str[idx] <= "9"
+      idx += 1
+      fraction_digits += 1
+    end
+    return false if fraction_digits == 0
+  end
+
+  if idx < str.length && (str[idx] == "e" || str[idx] == "E")
+    idx += 1
+    if idx < str.length && (str[idx] == "+" || str[idx] == "-")
+      idx += 1
+    end
+
+    exponent_digits = 0
+    while idx < str.length && str[idx] >= "0" && str[idx] <= "9"
+      idx += 1
+      exponent_digits += 1
+    end
+    return false if exponent_digits == 0
+  end
+
+  idx == str.length
+end
+
+def json_whitespace_byte?(byte)
+  byte == 9 || byte == 10 || byte == 13 || byte == 32
+end
+
+def json_skip_whitespace(str, idx)
+  while idx < str.length && json_whitespace_byte?(str.getbyte(idx))
+    idx += 1
+  end
+  idx
+end
+
+def json_hex_value(byte)
+  return byte - 48 if byte >= 48 && byte <= 57
+  return byte - 55 if byte >= 65 && byte <= 70
+  return byte - 87 if byte >= 97 && byte <= 102
+  nil
+end
+
+def json_append_codepoint(out, codepoint)
+  if codepoint <= 0x7f
+    out << codepoint.chr
+  elsif codepoint <= 0x7ff
+    out << (0xc0 | (codepoint >> 6)).chr
+    out << (0x80 | (codepoint & 0x3f)).chr
+  elsif codepoint <= 0xffff
+    out << (0xe0 | (codepoint >> 12)).chr
+    out << (0x80 | ((codepoint >> 6) & 0x3f)).chr
+    out << (0x80 | (codepoint & 0x3f)).chr
+  else
+    out << (0xf0 | (codepoint >> 18)).chr
+    out << (0x80 | ((codepoint >> 12) & 0x3f)).chr
+    out << (0x80 | ((codepoint >> 6) & 0x3f)).chr
+    out << (0x80 | (codepoint & 0x3f)).chr
+  end
+end
+
+def json_parse_string(str, idx)
+  raise RuntimeError, "Invalid JSON: expected string" unless str.getbyte(idx) == 34
+
+  idx += 1
+  out = ""
+
+  while idx < str.length
+    byte = str.getbyte(idx)
+
+    if byte == 34
+      return [out, idx + 1]
+    end
+
+    if byte == 92
+      idx += 1
+      raise RuntimeError, "Invalid JSON: incomplete escape" if idx >= str.length
+
+      escape = str.getbyte(idx)
+      case escape
+      when 34, 47, 92
+        out << escape.chr
+      when 98
+        out << "\\b"
+      when 102
+        out << "\\f"
+      when 110
+        out << "\\n"
+      when 114
+        out << "\\r"
+      when 116
+        out << "\\t"
+      when 117
+        codepoint = 0
+        4.times do
+          idx += 1
+          raise RuntimeError, "Invalid JSON: incomplete unicode escape" if idx >= str.length
+          hex = json_hex_value(str.getbyte(idx))
+          raise RuntimeError, "Invalid JSON: invalid unicode escape" if hex.nil?
+          codepoint = (codepoint * 16) + hex
+        end
+        json_append_codepoint(out, codepoint)
+      else
+        raise RuntimeError, "Invalid JSON: invalid escape"
+      end
+    else
+      raise RuntimeError, "Invalid JSON: control character in string" if byte < 0x20
+      out << byte.chr
+    end
+
+    idx += 1
+  end
+
+  raise RuntimeError, "Invalid JSON: unterminated string"
+end
+
+def json_parse_integer_token(token)
+  negative = false
+  idx = 0
+
+  if token.getbyte(0) == 45
+    negative = true
+    idx = 1
+  end
+
+  value = 0
+  digit_count = 0
+  while idx < token.length
+    byte = token.getbyte(idx)
+    break if byte < 48 || byte > 57
+    value = (value * 10) + (byte - 48)
+    digit_count += 1
+    idx += 1
+  end
+
+  raise RuntimeError, "Invalid JSON: invalid number" if digit_count == 0
+  negative ? -value : value
+end
+
+def json_parse_number(str, idx)
+  start = idx
+  byte = str.getbyte(idx)
+  idx += 1 if byte == 45
+
+  raise RuntimeError, "Invalid JSON: invalid number" if idx >= str.length
+
+  if str.getbyte(idx) == 48
+    idx += 1
+  else
+    digits = 0
+    while idx < str.length
+      byte = str.getbyte(idx)
+      break if byte < 48 || byte > 57
+      idx += 1
+      digits += 1
+    end
+    raise RuntimeError, "Invalid JSON: invalid number" if digits == 0
+  end
+
+  is_float = false
+
+  if idx < str.length && str.getbyte(idx) == 46
+    is_float = true
+    idx += 1
+    digits = 0
+    while idx < str.length
+      byte = str.getbyte(idx)
+      break if byte < 48 || byte > 57
+      idx += 1
+      digits += 1
+    end
+    raise RuntimeError, "Invalid JSON: invalid number" if digits == 0
+  end
+
+  if idx < str.length
+    byte = str.getbyte(idx)
+    if byte == 101 || byte == 69
+      is_float = true
+      idx += 1
+      if idx < str.length
+        sign = str.getbyte(idx)
+        idx += 1 if sign == 43 || sign == 45
+      end
+      digits = 0
+      while idx < str.length
+        digit = str.getbyte(idx)
+        break if digit < 48 || digit > 57
+        idx += 1
+        digits += 1
+      end
+      raise RuntimeError, "Invalid JSON: invalid number" if digits == 0
+    end
+  end
+
+  token = ""
+  cursor = start
+  while cursor < idx
+    token << str.getbyte(cursor).chr
+    cursor += 1
+  end
+
+  value = is_float ? token.to_f : json_parse_integer_token(token)
+  [value, idx]
+end
+
+def json_parse_array(str, idx)
+  values = []
+  idx += 1
+  idx = json_skip_whitespace(str, idx)
+  return [values, idx + 1] if idx < str.length && str.getbyte(idx) == 93
+
+  loop do
+    value, idx = json_parse_value(str, idx)
+    values << value
+    idx = json_skip_whitespace(str, idx)
+    raise RuntimeError, "Invalid JSON: unterminated array" if idx >= str.length
+
+    byte = str.getbyte(idx)
+    if byte == 44
+      idx = json_skip_whitespace(str, idx + 1)
+      next
+    end
+    if byte == 93
+      return [values, idx + 1]
+    end
+
+    raise RuntimeError, "Invalid JSON: malformed array"
+  end
+end
+
+def json_parse_object(str, idx)
+  result = {}
+  idx += 1
+  idx = json_skip_whitespace(str, idx)
+  return [result, idx + 1] if idx < str.length && str.getbyte(idx) == 125
+
+  loop do
+    key, idx = json_parse_string(str, idx)
+    idx = json_skip_whitespace(str, idx)
+    raise RuntimeError, "Invalid JSON: malformed object" if idx >= str.length || str.getbyte(idx) != 58
+
+    idx = json_skip_whitespace(str, idx + 1)
+    value, idx = json_parse_value(str, idx)
+    result[key] = value
+    idx = json_skip_whitespace(str, idx)
+    raise RuntimeError, "Invalid JSON: unterminated object" if idx >= str.length
+
+    byte = str.getbyte(idx)
+    if byte == 44
+      idx = json_skip_whitespace(str, idx + 1)
+      next
+    end
+    if byte == 125
+      return [result, idx + 1]
+    end
+
+    raise RuntimeError, "Invalid JSON: malformed object"
+  end
+end
+
+def json_parse_value(str, idx)
+  idx = json_skip_whitespace(str, idx)
+  raise RuntimeError, "Invalid JSON: unexpected end of input" if idx >= str.length
+
+  byte = str.getbyte(idx)
+
+  if byte == 34
+    return json_parse_string(str, idx)
+  end
+  if byte == 123
+    return json_parse_object(str, idx)
+  end
+  if byte == 91
+    return json_parse_array(str, idx)
+  end
+  if byte == 116 && str[idx, 4] == "true"
+    return [true, idx + 4]
+  end
+  if byte == 102 && str[idx, 5] == "false"
+    return [false, idx + 5]
+  end
+  if byte == 110 && str[idx, 4] == "null"
+    return [nil, idx + 4]
+  end
+  if byte == 45 || (byte >= 48 && byte <= 57)
+    return json_parse_number(str, idx)
+  end
+
+  raise RuntimeError, "Invalid JSON"
+end
+
 def parse_json(str)
   return {} if str.nil? || str.empty?
-  str = str.strip
-  return nil if str == "null"
-  return true if str == "true"
-  return false if str == "false"
 
-  if str.length > 0 && (str[0] == "-" || (str[0] >= "0" && str[0] <= "9"))
-    return str.include?(".") ? str.to_f : str.to_i
-  end
-
-  if str.start_with?("\\"") && str.end_with?("\\"")
-    return str[1..-2]
-  end
-
-  if str.start_with?("{") && str.end_with?("}")
-    result = {}
-    content = str[1..-2].strip
-    return result if content.empty?
-
-    pairs = []
-    depth = 0
-    current = ""
-    content.each_char do |c|
-      if c == "{" || c == "["
-        depth += 1
-        current << c
-      elsif c == "}" || c == "]"
-        depth -= 1
-        current << c
-      elsif c == "," && depth == 0
-        pairs << current.strip
-        current = ""
-      else
-        current << c
+  if Object.const_defined?(:JSON)
+    json_parser = Object.const_get(:JSON)
+    if json_parser.respond_to?(:parse)
+      begin
+        return json_parser.parse(str)
+      rescue => e
+        raise RuntimeError, "Invalid JSON: #{e.message}"
       end
     end
-    pairs << current.strip unless current.empty?
-
-    pairs.each do |pair|
-      colon_idx = nil
-      in_string = false
-      pair.each_char.with_index do |c, i|
-        if c == "\\"" && (i == 0 || pair[i-1] != "\\\\")
-          in_string = !in_string
-        elsif c == ":" && !in_string
-          colon_idx = i
-          break
-        end
-      end
-
-      if colon_idx
-        key_part = pair[0...colon_idx].strip
-        val_part = pair[(colon_idx+1)..-1].strip
-        if key_part.start_with?("\\"") && key_part.end_with?("\\"")
-          key = key_part[1..-2].to_sym
-          result[key] = parse_json(val_part)
-        end
-      end
-    end
-    return result
   end
 
-  str
+  source = str.to_s
+  idx = json_skip_whitespace(source, 0)
+  value, idx = json_parse_value(source, idx)
+  idx = json_skip_whitespace(source, idx)
+  raise RuntimeError, "Invalid JSON: trailing content" unless idx == source.length
+  value
 end
 
 \$app = Homura.new
@@ -246,15 +2058,258 @@ end
 export const USER_ROUTES = `# Homura Routes - Define your application routes here
 # This is the main file you'll edit to build your app
 
+# ===== Middleware =====
+# 共通ミドルウェア: /api/* のJSON APIでは本文付きPOST/PUT/PATCH時にContent-Type検証
+def require_json_content_type(ctx)
+  method = ctx.req.method
+  return false unless method == "POST" || method == "PUT" || method == "PATCH"
+  return false unless ctx.req.path.start_with?("/api/")
+  return false if ctx.req.text.to_s.empty?
+  content_type = ctx.req.header("content-type").to_s
+  !content_type.include?("application/json")
+end
+
+\$app.use do |ctx, nxt|
+  if require_json_content_type(ctx)
+    ctx.json({ error: "Content-Type must be application/json" }, status: 415)
+  else
+    nxt.call
+  end
+end
+
+def normalize_todo_row(row)
+  return nil unless row.is_a?(Hash)
+  completed = row["completed"]
+  completed = row[:completed] unless row.key?("completed")
+  id = row["id"]
+  id = row[:id] unless row.key?("id")
+
+  row["completed"] =
+    if completed == true || completed == 1 || completed == "1" || (completed.is_a?(String) && completed.downcase == "true")
+      true
+    else
+      false
+    end
+  row["id"] = id.to_i unless id.nil?
+  row
+end
+
+def normalize_todo_list(raw_rows)
+  return [] unless raw_rows.is_a?(Array)
+  raw_rows.map { |row| normalize_todo_row(row) }.compact
+end
+
+def ascii_whitespace_byte?(byte)
+  byte == 9 || byte == 10 || byte == 11 || byte == 12 || byte == 13 || byte == 32
+end
+
+def trim_ascii_text(value)
+  source = value.to_s
+  left = 0
+  right = source.length - 1
+
+  while left <= right
+    byte = source.getbyte(left)
+    break unless ascii_whitespace_byte?(byte)
+    left += 1
+  end
+
+  while right >= left
+    byte = source.getbyte(right)
+    break unless ascii_whitespace_byte?(byte)
+    right -= 1
+  end
+
+  return "" if right < left
+
+  trimmed = ""
+  idx = left
+  while idx <= right
+    trimmed << source[idx]
+    idx += 1
+  end
+  trimmed
+end
+
+def parse_positive_integer_string(value)
+  text = value.to_s
+  return nil if text.empty?
+
+  number = 0
+  digit_count = 0
+  text.each_byte do |byte|
+    return nil if byte < 48 || byte > 57
+    number = (number * 10) + (byte - 48)
+    digit_count += 1
+  end
+
+  return nil if digit_count == 0
+  number > 0 ? number : nil
+end
+
+def parse_todo_title(body)
+  return nil unless body.is_a?(Hash)
+  title = body[:title]
+  title = body["title"] if title.nil?
+  return nil if title.nil?
+
+  normalized = trim_ascii_text(title)
+  normalized.empty? ? nil : String.new(normalized)
+end
+
+def parse_todo_completed(body)
+  return nil unless body.is_a?(Hash)
+  value = body[:completed]
+  value = body["completed"] if value.nil?
+  return true if value == true || value == 1 || value == "1" || value.to_s.downcase == "true"
+  return false if value == false || value == 0 || value == "0" || value.to_s.downcase == "false"
+  nil
+end
+
+def parse_todo_payload(body)
+  return nil unless body.is_a?(Hash)
+  {
+    title: parse_todo_title(body),
+    completed: parse_todo_completed(body),
+  }
+end
+
+def todo_field_present?(body, key)
+  return false unless body.is_a?(Hash)
+  body.key?(key) || body.key?(key.to_s)
+end
+
+def parse_todo_id(ctx)
+  value = ctx.req.param("id")
+  return nil if value.nil?
+  parse_positive_integer_string(value)
+end
+
 # ===== Pages =====
 
 \$app.get "/" do |c|
-  current_count = c.kv_get("counter") || "0"
-  c.jsx("home", { counter: current_count })
+  rows = c.db.all("SELECT id, title, completed, created_at, updated_at, completed_at FROM todos ORDER BY id DESC")
+  todos = normalize_todo_list(rows)
+  c.jsx("home", { "todos" => todos.to_json }, status: 200)
+end
+
+\$app.get "/api/todos" do |c|
+  rows = c.db.all("SELECT id, title, completed, created_at, updated_at, completed_at FROM todos ORDER BY id DESC")
+  c.json(normalize_todo_list(rows))
+end
+
+\$app.post "/api/todos" do |c|
+  body = c.json_body
+  title = parse_todo_title(body)
+  unless title
+    c.json({ error: "title must be a non-empty string" }, status: 400)
+  else
+    c.db.run(
+      "INSERT INTO todos (title, completed, created_at, updated_at) VALUES (?, 0, datetime('now'), datetime('now'))",
+      [title]
+    )
+    insert_meta = c.db.get("SELECT last_insert_rowid() AS id")
+    last_row_id = insert_meta && (insert_meta["id"] || insert_meta[:id])
+    todo = c.db.get(
+      "SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?",
+      [last_row_id]
+    )
+    if !last_row_id || !todo
+      c.json({ error: "Failed to create todo" }, status: 500)
+    else
+      c.json(normalize_todo_row(todo), status: 201)
+    end
+  end
+end
+
+\$app.get "/api/todos/:id" do |c|
+  id = parse_todo_id(c)
+  unless id
+    c.json({ error: "Invalid todo id" }, status: 400)
+  else
+    todo = c.db.get(
+      "SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?",
+      [id]
+    )
+    if todo
+      c.json(normalize_todo_row(todo))
+    else
+      c.json({ error: "Todo not found" }, status: 404)
+    end
+  end
+end
+
+\$app.put "/api/todos/:id" do |c|
+  id = parse_todo_id(c)
+  unless id
+    c.json({ error: "Invalid todo id" }, status: 400)
+  else
+    body = c.json_body
+    payload = parse_todo_payload(body)
+    title_present = todo_field_present?(body, :title)
+    completed_present = todo_field_present?(body, :completed)
+    title = payload && payload[:title]
+    completed = payload && payload[:completed]
+
+    if title_present && !title
+      c.json({ error: "title must be a non-empty string" }, status: 400)
+    elsif completed_present && completed.nil?
+      c.json({ error: "completed must be a boolean" }, status: 400)
+    elsif !title_present && !completed_present
+      c.json({ error: "title or completed is required" }, status: 400)
+    else
+      existing = c.db.get("SELECT id FROM todos WHERE id = ?", [id])
+      unless existing
+        c.json({ error: "Todo not found" }, status: 404)
+      else
+      updates = []
+      binds = []
+      if title_present
+        updates << "title = ?"
+        binds << title
+      end
+      if completed_present
+        updates << "completed = ?"
+        binds << (completed ? 1 : 0)
+        updates << (completed ? "completed_at = datetime('now')" : "completed_at = NULL")
+      end
+      updates << "updated_at = datetime('now')"
+
+      c.db.run(
+        "UPDATE todos SET #{updates.join(', ')} WHERE id = ?",
+        binds + [id]
+      )
+      todo = c.db.get(
+        "SELECT id, title, completed, created_at, updated_at, completed_at FROM todos WHERE id = ?",
+        [id]
+      )
+      if todo
+        c.json(normalize_todo_row(todo))
+      else
+        c.json({ error: "Failed to load updated todo" }, status: 500)
+      end
+      end
+    end
+  end
+end
+
+\$app.delete "/api/todos/:id" do |c|
+  id = parse_todo_id(c)
+  unless id
+    c.json({ error: "Invalid todo id" }, status: 400)
+  else
+    existing = c.db.get("SELECT id FROM todos WHERE id = ?", [id])
+    if existing
+      c.db.run("DELETE FROM todos WHERE id = ?", [id])
+      c.json({ ok: true, id: id })
+    else
+      c.json({ error: "Todo not found" }, status: 404)
+    end
+  end
 end
 
 \$app.get "/hello/:name" do |c|
-  safe_name = View.h(c.params[:name])
+  safe_name = View.h(c.req.param("name"))
   c.html("<h1>Hello, " + safe_name + "!</h1><p>Homura - Ruby on the Edge</p>")
 end
 
@@ -271,7 +2326,7 @@ end
 # ===== Users CRUD =====
 
 \$app.get "/users/:id" do |c|
-  c.json({ user_id: c.params[:id], action: "show" })
+  c.json({ user_id: c.req.param("id"), action: "show" })
 end
 
 \$app.post "/users" do |c|
@@ -279,15 +2334,15 @@ end
 end
 
 \$app.put "/users/:id" do |c|
-  c.json({ action: "update", user_id: c.params[:id], body: c.body })
+  c.json({ action: "update", user_id: c.req.param("id"), body: c.body })
 end
 
 \$app.patch "/users/:id" do |c|
-  c.json({ action: "patch", user_id: c.params[:id], body: c.body })
+  c.json({ action: "patch", user_id: c.req.param("id"), body: c.body })
 end
 
 \$app.delete "/users/:id" do |c|
-  c.json({ action: "delete", user_id: c.params[:id] })
+  c.json({ action: "delete", user_id: c.req.param("id") })
 end
 
 # ===== KV Counter =====
@@ -308,13 +2363,13 @@ end
 # ===== KV Users =====
 
 \$app.post "/kv/users/:name" do |c|
-  name = c.params[:name]
+  name = c.req.param("name")
   c.kv_put("user:" + name, c.body)
   c.json({ saved: name, body: c.body }, status: 201)
 end
 
 \$app.get "/kv/users/:name" do |c|
-  name = c.params[:name]
+  name = c.req.param("name")
   data = c.kv_get("user:" + name)
   if data
     c.json({ user: name, data: data })
@@ -324,7 +2379,7 @@ end
 end
 
 \$app.delete "/kv/users/:name" do |c|
-  name = c.params[:name]
+  name = c.req.param("name")
   c.kv_delete("user:" + name)
   c.json({ deleted: name })
 end

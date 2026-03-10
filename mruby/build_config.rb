@@ -69,5 +69,6 @@ MRuby::CrossBuild.new('wasm32-wasi') do |conf|
   conf.gem :core => 'mruby-kernel-ext'
   conf.gem :core => 'mruby-class-ext'
   conf.gem :core => 'mruby-method'
+  conf.gem :core => 'mruby-error'
   conf.gem :core => 'mruby-compiler'
 end
