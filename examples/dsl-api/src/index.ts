@@ -10,7 +10,7 @@
 import mrubyWasm from '../../../mruby/build/mruby.wasm';
 import { renderTemplate } from './templates.tsx';
 import { APP_CSS } from './styles-bundle';
-import { HOMURA_CORE, HOMURA_MODEL, USER_ROUTES } from './ruby-bundle';
+import { HOMURA_CORE, HOMURA_MODEL, USER_MODELS, USER_ROUTES, HOMURA_CORE_MRB, HOMURA_MODEL_MRB, USER_MODELS_MRB, USER_ROUTES_MRB_CHUNKS, HAS_PRECOMPILED } from './ruby-bundle';
 
 // Homura MessagePack v2 contract: request/response/control are
 // transported as a single typed envelope and all app routing is in Ruby.
@@ -26,7 +26,7 @@ const MAX_LOOP_ITERATIONS = 16;
 const MAX_OPS_PER_LOOP = 64;
 const MAX_SQL_LENGTH = 5000;
 const MAX_SQL_BIND_COUNT = 64;
-const MAX_LONGJMP_RETRIES = 64;
+const MAX_LONGJMP_RETRIES = 4096;
 const NAMED_D1_STATEMENTS: Record<string, string> = {
   'stmt:todo_insert_returning':
     "INSERT INTO todos (title, completed, created_at, updated_at) VALUES (?, 0, datetime('now'), datetime('now')) RETURNING id, title, completed, created_at, updated_at, completed_at",
@@ -44,6 +44,73 @@ const NAMED_D1_STATEMENTS: Record<string, string> = {
     'DELETE FROM todos WHERE id = ? RETURNING id',
 };
 const DEBUG_LONGJMP = false;
+
+/**
+ * Split Ruby source into chunks at top-level class/end boundaries
+ * and top-level $app.* route definitions to reduce longjmp pressure.
+ */
+function splitRubyChunks(source: string): string[] {
+  const lines = source.split('\n');
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let depth = 0;
+  let inClass = false;
+
+  const blockOpenRe = /^(class|module|def|if|unless|while|until|case|begin|for)\b/;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('#') || trimmed === '') {
+      current.push(line);
+      continue;
+    }
+
+    const openMatch = blockOpenRe.test(trimmed);
+    const doBlock = /\bdo\s*(\|.*\|)?\s*$/.test(trimmed);
+    const isPostfix = /\b(if|unless|while|until)\b/.test(trimmed) &&
+      !/^(if|unless|while|until)\b/.test(trimmed);
+
+    // Start of a top-level class/module
+    if (/^(class|module)\s/.test(trimmed) && depth === 0) {
+      if (current.length > 0) {
+        const text = current.join('\n').trim();
+        if (text) chunks.push(text);
+        current = [];
+      }
+      inClass = true;
+    } else if (depth === 0 && !inClass && /^\$app\.\w+\s/.test(trimmed)) {
+      if (current.length > 0) {
+        const text = current.join('\n').trim();
+        if (text) chunks.push(text);
+        current = [];
+      }
+    }
+
+    current.push(line);
+
+    if (openMatch && !isPostfix) {
+      depth++;
+    } else if (doBlock) {
+      depth++;
+    }
+
+    if (trimmed === 'end' && depth > 0) {
+      depth--;
+      if (depth === 0 && inClass) {
+        chunks.push(current.join('\n'));
+        current = [];
+        inClass = false;
+      }
+    }
+  }
+
+  if (current.length > 0) {
+    const text = current.join('\n').trim();
+    if (text) chunks.push(text);
+  }
+
+  return chunks;
+}
 
 interface RubyRequestEnvelope {
   v: number;
@@ -1213,6 +1280,59 @@ class MRuby {
       return 0;
     });
 
+    // Clear longjmp registry after eval to prevent stale entries from
+    // interfering with subsequent eval calls. Without this, accumulated
+    // setjmp buffers from previous evals can cause "memory access out of bounds"
+    // on the 3rd+ eval call.
+    jmpBufRegistry.clear();
+
+    const currentMemory = this.getMemory();
+    const resultPtr = exports.homura_get_result();
+    const memoryView = new Uint8Array(currentMemory.buffer);
+    let resultEnd = resultPtr;
+    while (memoryView[resultEnd] !== 0 && resultEnd < resultPtr + bufferSize) {
+      resultEnd++;
+    }
+
+    return decoder.decode(new Uint8Array(currentMemory.buffer, resultPtr, resultEnd - resultPtr));
+  }
+
+  /**
+   * Load pre-compiled mrb bytecode via homura_load_irep.
+   * This avoids the longjmp-heavy eval path entirely.
+   */
+  loadIrep(mrbBase64: string): string {
+    if (!this.instance) throw new Error('mruby not initialized');
+
+    const exports = this.instance.exports as any;
+    if (!exports.homura_load_irep) {
+      throw new Error('homura_load_irep not available - rebuild mruby.wasm');
+    }
+
+    const memory = this.getMemory();
+    const decoder = new TextDecoder();
+
+    // Decode base64 to binary
+    const binaryStr = atob(mrbBase64);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+
+    const bufferPtr = exports.homura_get_input_buffer();
+    const bufferSize = exports.homura_get_buffer_size();
+
+    if (bytes.length > bufferSize) {
+      throw new Error(`Bytecode too large: ${bytes.length} > ${bufferSize}`);
+    }
+
+    new Uint8Array(memory.buffer).set(bytes, bufferPtr);
+
+    this.invokeWithLongjmpRetry('load_irep', () => {
+      exports.homura_load_irep(bytes.length);
+      return 0;
+    });
+
     const currentMemory = this.getMemory();
     const resultPtr = exports.homura_get_result();
     const memoryView = new Uint8Array(currentMemory.buffer);
@@ -1412,28 +1532,28 @@ export default {
         await mruby.init();
       }
 
-      // Load framework core, model layer, and user routes (trusted code, eval is safe here)
+      // Load framework core, model layer, and user routes
       if (!coreLoaded) {
-        const coreResult = mruby.eval(HOMURA_CORE);
-        const coreError = mruby.parseEvalFailure(coreResult);
-        if (coreError) {
-          console.error('[homura] Failed to load core:', coreError);
-          mruby = null;
-          throw new Error('Framework initialization failed');
-        }
-        const modelResult = mruby.eval(HOMURA_MODEL);
-        const modelError = mruby.parseEvalFailure(modelResult);
-        if (modelError) {
-          console.error('[homura] Failed to load model layer:', modelError);
-          mruby = null;
-          throw new Error('Model loading failed');
-        }
-        const routeResult = mruby.eval(USER_ROUTES);
-        const routeError = mruby.parseEvalFailure(routeResult);
-        if (routeError) {
-          console.error('[homura] Failed to load routes:', routeError);
-          mruby = null;
-          throw new Error('Route loading failed');
+        // Load via eval (4 separate calls with jmpBufRegistry cleanup between each).
+        // irep loading is available but currently unstable with the ORM's define_method usage,
+        // so we use eval which has been verified to work reliably.
+        {
+          console.info('[homura] Loading via eval...');
+          const evalAndCheck = (label: string, code: string) => {
+            if (!code) return; // skip empty (e.g. no models.rb)
+            const result = mruby!.eval(code);
+            const error = mruby!.parseEvalFailure(result);
+            if (error) {
+              console.error(`[homura] Failed to load ${label}:`, error);
+              mruby = null;
+              throw new Error(`${label} loading failed`);
+            }
+            console.info(`[homura] ${label} loaded via eval.`);
+          };
+          evalAndCheck('core', HOMURA_CORE);
+          evalAndCheck('model', HOMURA_MODEL);
+          evalAndCheck('models', USER_MODELS);
+          evalAndCheck('routes', USER_ROUTES);
         }
         coreLoaded = true;
       }

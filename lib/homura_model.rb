@@ -642,10 +642,21 @@ class Homura
           end
         end
         if opts[:format]
-          pattern = opts[:format][:with]
           value = @attributes[name]
-          if value.is_a?(String) && pattern && !pattern.match(value)
-            @errors << "#{name} is invalid"
+          if value.is_a?(String)
+            fmt = opts[:format]
+            if fmt[:pattern] == :email
+              # Simple email check without regex (mruby has no Regexp by default)
+              valid = value.include?("@") && !value.include?(" ") && value.length >= 3
+              at_pos = value.index("@")
+              valid = false if at_pos.nil? || at_pos == 0 || at_pos == value.length - 1
+              @errors << "#{name} is invalid" unless valid
+            elsif fmt[:with]
+              pattern = fmt[:with]
+              if pattern && !pattern.match(value)
+                @errors << "#{name} is invalid"
+              end
+            end
           end
         end
         if opts[:inclusion]
@@ -898,17 +909,13 @@ class Homura
         @attributes[attr_name]
       end
 
+      # Use a helper method to capture loop variables correctly in closures.
+      # Without this, mruby's while-loop variable `key` would be shared
+      # across all closures and always reference the last loop value.
       keys = mapping.keys
       index = 0
       while index < keys.length
-        key = keys[index]
-        define_method("#{key}?") do
-          @attributes[attr_name] == mapping[key] || @attributes[attr_name].to_s == key
-        end
-        define_method("#{key}!") do
-          @attributes[attr_name] = mapping[key]
-          self
-        end
+        _define_enum_predicate_and_bang(attr_name, keys[index], mapping)
         index += 1
       end
 
@@ -918,6 +925,17 @@ class Homura
       end
       define_singleton_method("#{attr_name}_values") do
         enums[attr_name]
+      end
+    end
+
+    def self._define_enum_predicate_and_bang(attr_name, key, mapping)
+      val = mapping[key]
+      define_method("#{key}?") do
+        @attributes[attr_name] == val || @attributes[attr_name].to_s == key.to_s
+      end
+      define_method("#{key}!") do
+        @attributes[attr_name] = val
+        self
       end
     end
 
