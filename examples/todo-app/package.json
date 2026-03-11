@@ -1,0 +1,17 @@
+{
+  "name": "homura-todo-app",
+  "version": "0.1.0",
+  "description": "Todo app example showcasing Homura::Model ORM features",
+  "type": "module",
+  "scripts": {
+    "bundle:ruby": "node scripts/bundle-ruby.js",
+    "build:mruby": "cd ../../mruby && make",
+    "build": "npm run bundle:ruby && npm run build:mruby",
+    "dev": "npm run bundle:ruby && wrangler dev",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.99.0"
+  },
+  "license": "MIT"
+}

@@ -48,7 +48,7 @@ class Homura
         @distinct_flag = false
       end
 
-      def where(conditions = {})
+      def where(conditions = nil)
         return WhereChain.new(self) if conditions.nil?
         return self unless conditions.is_a?(Hash)
         keys = conditions.keys
@@ -515,7 +515,7 @@ class Homura
       classify(word.to_sym)
     end
 
-    def self.where(conditions = {})
+    def self.where(conditions = nil)
       Query.new(self).where(conditions)
     end
 
