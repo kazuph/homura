@@ -1430,6 +1430,10 @@ interface Env {
 
 let mruby: MRuby | null = null;
 let coreLoaded = false;
+let requestCount = 0;
+// Proactively recycle WASM instance every N requests to prevent memory corruption.
+// mruby WASM instances degrade after ~20 requests, producing garbled MessagePack data.
+const MAX_REQUESTS_BEFORE_RECYCLE = 8;
 
 // Mutex to serialize access to the mruby WASM instance.
 // Without this, concurrent requests interleave at await points (D1 ops),
@@ -1480,10 +1484,20 @@ export default {
 
     try {
       return await withMrubyLock(async () => {
+      // Proactively recycle WASM instance before corruption threshold
+      if (mruby && requestCount >= MAX_REQUESTS_BEFORE_RECYCLE) {
+        console.info(`[homura] Proactive WASM recycle after ${requestCount} requests`);
+        try { mruby.close(); } catch (_) { /* ignore close errors */ }
+        mruby = null;
+        coreLoaded = false;
+        requestCount = 0;
+      }
+
       // Initialize mruby VM
       if (!mruby) {
         mruby = new MRuby();
         await mruby.init();
+        requestCount = 0;
       }
 
       // Load framework core, model layer, and user routes
@@ -1546,9 +1560,20 @@ export default {
           try { mruby.close(); } catch (_) { /* ignore close errors */ }
           mruby = null;
           coreLoaded = false;
+          requestCount = 0;
           throw wasmError;
         }
-        currentResult = validateRubyResponse(rawResult);
+        try {
+          currentResult = validateRubyResponse(rawResult);
+        } catch (validationError) {
+          // Garbled response = WASM memory corruption → reset instance
+          console.error('[homura] Garbled WASM response, resetting mruby instance:', validationError);
+          try { mruby.close(); } catch (_) { /* ignore close errors */ }
+          mruby = null;
+          coreLoaded = false;
+          requestCount = 0;
+          throw validationError;
+        }
         const loopOps = await executeLoopOps(env, currentResult);
         const summary = summarizeLoopResults(loopOps);
         const loopMs = loopOps.reduce((acc, item) => acc + (item.duration_ms || 0), 0);
@@ -1640,6 +1665,7 @@ export default {
 
       // Reclaim mruby heap after each request to prevent memory growth
       mruby.gc();
+      requestCount++;
 
       return response;
       }); // end withMrubyLock
