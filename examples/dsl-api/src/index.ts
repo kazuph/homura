@@ -1387,12 +1387,8 @@ class MRuby {
           console.error('[homura] Failed to decode request response:', decodeError);
         }
       }
-      return {
-        v: HOMURA_MSGPACK_VERSION,
-        status: 500,
-        headers: { 'Content-Type': 'text/plain' },
-        body: output || 'Internal Server Error',
-      };
+      // Throw instead of returning 500 so retry logic can catch it
+      throw new Error(`WASM handleRequest failed: ${output || 'no output'}`);
     }
 
     const outputData = new Uint8Array(memory.buffer, outputPtr, outputLen);
@@ -1428,6 +1424,9 @@ class MRuby {
       exports.homura_close();
       this.instance = null;
     }
+    // Clear longjmp registry to prevent stale entries referencing dead WASM memory
+    jmpBufRegistry.clear();
+    labelCounter = 1;
   }
 }
 
@@ -1443,7 +1442,7 @@ let coreLoaded = false;
 let requestCount = 0;
 // Proactively recycle WASM instance every N requests to prevent memory corruption.
 // mruby WASM instances degrade after ~20 requests, producing garbled MessagePack data.
-const MAX_REQUESTS_BEFORE_RECYCLE = 8;
+const MAX_REQUESTS_BEFORE_RECYCLE = 20;
 
 // Mutex to serialize access to the mruby WASM instance.
 // Without this, concurrent requests interleave at await points (D1 ops),
@@ -1494,7 +1493,6 @@ export default {
 
     try {
       return await withMrubyLock(async () => {
-      // Initialize mruby VM
       // Proactively recycle WASM instance before corruption threshold
       if (mruby && requestCount >= MAX_REQUESTS_BEFORE_RECYCLE) {
         console.info(`[homura] Proactive WASM recycle after ${requestCount} requests`);
@@ -1504,26 +1502,21 @@ export default {
         requestCount = 0;
       }
 
-      if (!mruby) {
-        mruby = new MRuby();
-        await mruby.init();
-        requestCount = 0;
-      }
-
-      // Load framework core, model layer, and user routes
-      if (!coreLoaded) {
-        // Load via eval (4 separate calls with jmpBufRegistry cleanup between each).
-        // irep loading is available but currently unstable with the ORM's define_method usage,
-        // so we use eval which has been verified to work reliably.
-        {
+      // Initialize mruby VM with retry on failure
+      const ensureMrubyReady = async () => {
+        if (!mruby) {
+          mruby = new MRuby();
+          await mruby.init();
+          requestCount = 0;
+        }
+        if (!coreLoaded) {
           console.info('[homura] Loading via eval...');
           const evalAndCheck = (label: string, code: string) => {
-            if (!code) return; // skip empty (e.g. no models.rb)
+            if (!code) return;
             const result = mruby!.eval(code);
             const error = mruby!.parseEvalFailure(result);
             if (error) {
               console.error(`[homura] Failed to load ${label}:`, error);
-              mruby = null;
               throw new Error(`${label} loading failed`);
             }
             console.info(`[homura] ${label} loaded via eval.`);
@@ -1532,8 +1525,23 @@ export default {
           evalAndCheck('model', HOMURA_MODEL);
           evalAndCheck('models', USER_MODELS);
           evalAndCheck('routes', USER_ROUTES);
+          coreLoaded = true;
         }
-        coreLoaded = true;
+      };
+
+      const resetAndReinit = async () => {
+        try { mruby?.close(); } catch (_) { /* ignore */ }
+        mruby = null;
+        coreLoaded = false;
+        requestCount = 0;
+        await ensureMrubyReady();
+      };
+
+      try {
+        await ensureMrubyReady();
+      } catch (initError) {
+        console.warn('[homura] Init failed, retrying with fresh instance:', initError);
+        await resetAndReinit();
       }
 
       // Build env as structured data (NO string interpolation / eval)
@@ -1551,6 +1559,8 @@ export default {
         control: { continue: false },
       };
 
+      // Retry wrapper: if WASM corruption/garbled response occurs, reset + retry once
+      const executeRequest = async (attempt: number): Promise<Response> => {
       let loopCount = 0;
       let currentResult: RubyResponse | null = null;
       const rubyRequest = rubyEnv;
@@ -1565,23 +1575,15 @@ export default {
         try {
           rawResult = mruby.handleRequest(requestEnvelope);
         } catch (wasmError) {
-          // WASM memory corruption → destroy instance so next request gets a fresh one
-          console.error('[homura] WASM error, resetting mruby instance:', wasmError);
-          try { mruby.close(); } catch (_) { /* ignore close errors */ }
-          mruby = null;
-          coreLoaded = false;
-          requestCount = 0;
+          console.error(`[homura] WASM error (attempt ${attempt}), resetting:`, wasmError);
+          await resetAndReinit();
           throw wasmError;
         }
         try {
           currentResult = validateRubyResponse(rawResult);
         } catch (validationError) {
-          // Garbled response = WASM memory corruption → reset instance
-          console.error('[homura] Garbled WASM response, resetting mruby instance:', validationError);
-          try { mruby.close(); } catch (_) { /* ignore close errors */ }
-          mruby = null;
-          coreLoaded = false;
-          requestCount = 0;
+          console.error(`[homura] Garbled response (attempt ${attempt}), resetting:`, validationError);
+          await resetAndReinit();
           throw validationError;
         }
         const loopOps = await executeLoopOps(env, currentResult);
@@ -1678,6 +1680,15 @@ export default {
       requestCount++;
 
       return response;
+      }; // end executeRequest
+
+      // Try request, retry once on WASM corruption
+      try {
+        return await executeRequest(1);
+      } catch (firstError) {
+        console.warn('[homura] Request failed (attempt 1), retrying with fresh WASM:', firstError);
+        return await executeRequest(2);
+      }
       }); // end withMrubyLock
 
     } catch (error) {
