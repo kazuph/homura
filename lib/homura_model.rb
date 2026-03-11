@@ -65,7 +65,9 @@ class Homura
 
       def order(order_clause)
         text = order_clause.to_s
-        @order_clause = text.empty? ? nil : text
+        return self if text.empty?
+        validate_order_clause(text)
+        @order_clause = text
         self
       end
 
@@ -85,7 +87,9 @@ class Homura
         @select_columns = []
         index = 0
         while index < columns.length
-          @select_columns << columns[index].to_s
+          col = columns[index].to_s
+          @model.validate_column(col) unless col == "*"
+          @select_columns << col
           index += 1
         end
         self
@@ -95,7 +99,9 @@ class Homura
         values = []
         index = 0
         while index < columns.length
-          values << columns[index].to_s
+          col = columns[index].to_s
+          @model.validate_column(col)
+          values << col
           index += 1
         end
         @group_clause = values.empty? ? nil : values.join(", ")
@@ -103,8 +109,9 @@ class Homura
       end
 
       def having(clause, *binds)
-        @having_clause = clause.to_s
-        @having_clause = nil if @having_clause.empty?
+        text = clause.to_s
+        validate_sql_fragment(text)
+        @having_clause = text.empty? ? nil : text
         @having_binds = binds
         self
       end
@@ -264,6 +271,48 @@ class Homura
         return @order_clause.gsub(" DESC", " ASC") if @order_clause.include?(" DESC")
         return @order_clause.gsub(" ASC", " DESC") if @order_clause.include?(" ASC")
         @order_clause + " DESC"
+      end
+
+      UNSAFE_CHARS = [";", "'", "\"", "-" + "-", "/", "\\"].freeze
+
+      def validate_order_clause(text)
+        parts = text.split(",")
+        index = 0
+        while index < parts.length
+          part = parts[index].strip
+          tokens = part.split(" ")
+          col = tokens[0]
+          dir = tokens[1]
+          raise ArgumentError, "Invalid order clause: #{text}" if col.nil? || col.empty?
+          validate_identifier(col)
+          raise ArgumentError, "Invalid order direction: #{dir}" if dir && dir.upcase != "ASC" && dir.upcase != "DESC"
+          raise ArgumentError, "Invalid order clause: #{text}" if tokens.length > 2
+          index += 1
+        end
+      end
+
+      def validate_sql_fragment(text)
+        return if text.empty?
+        idx = 0
+        while idx < UNSAFE_CHARS.length
+          raise ArgumentError, "Invalid SQL fragment: #{text}" if text.include?(UNSAFE_CHARS[idx])
+          idx += 1
+        end
+      end
+
+      def validate_identifier(name)
+        raise ArgumentError, "Invalid identifier: #{name}" if name.empty?
+        chars = name.chars
+        first = chars[0]
+        raise ArgumentError, "Invalid identifier: #{name}" unless (first >= "a" && first <= "z") || (first >= "A" && first <= "Z") || first == "_"
+        idx = 1
+        while idx < chars.length
+          c = chars[idx]
+          unless (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c == "_"
+            raise ArgumentError, "Invalid identifier: #{name}"
+          end
+          idx += 1
+        end
       end
 
       def select_sql

@@ -1,8 +1,40 @@
 import { expect, test } from "@playwright/test";
 
 test.describe("dsl-api ORM integration", () => {
+  // Tests are ordered to run lightweight/edge-case tests early while WASM
+  // instance is fresh, then heavier integration tests. Each test creates
+  // its own data and uses unique identifiers for isolation.
+
   // ========================================
-  // 1. Basic CRUD (existing, but verify still works)
+  // 1. Edge cases: malformed/empty input (lightweight, run first)
+  // ========================================
+  test("rejects malformed JSON body", async ({ request }) => {
+    const res = await request.post("/api/articles", {
+      headers: { "content-type": "application/json" },
+      data: "this is not json{{{",
+    });
+    // Should return 400 (bad JSON) or 422 (validation failure), not 500
+    expect(res.status()).toBeLessThan(500);
+  });
+
+  test("rejects empty body", async ({ request }) => {
+    const res = await request.post("/api/authors", {
+      headers: { "content-type": "application/json" },
+      data: {},
+    });
+    // Missing required fields -> 422
+    expect(res.status()).toBe(422);
+    const result = await res.json();
+    expect(result.errors.length).toBeGreaterThan(0);
+  });
+
+  test("unknown article ID returns 404", async ({ request }) => {
+    const res = await request.get("/api/articles/99999");
+    expect(res.status()).toBe(404);
+  });
+
+  // ========================================
+  // 2. Basic CRUD
   // ========================================
   test("basic author CRUD", async ({ request }) => {
     const createRes = await request.post("/api/authors", {
@@ -23,7 +55,7 @@ test.describe("dsl-api ORM integration", () => {
   });
 
   // ========================================
-  // 2. Validations (presence, length, format)
+  // 3. Validations (presence, length, format)
   // ========================================
   test("validates presence", async ({ request }) => {
     const res = await request.post("/api/articles", {
@@ -69,7 +101,52 @@ test.describe("dsl-api ORM integration", () => {
   });
 
   // ========================================
-  // 3. Associations (has_many, belongs_to, has_one)
+  // 4. by_author scope (run early, needs 7 requests)
+  // ========================================
+  test("scope: by_author filters articles by author_id", async ({ request }) => {
+    // Create 2 authors
+    const author1Res = await request.post("/api/authors", {
+      headers: { "content-type": "application/json" },
+      data: { name: "Author One", email: "one@example.com" },
+    });
+    const author1 = await author1Res.json();
+
+    const author2Res = await request.post("/api/authors", {
+      headers: { "content-type": "application/json" },
+      data: { name: "Author Two", email: "two@example.com" },
+    });
+    const author2 = await author2Res.json();
+
+    // Create articles for each author
+    await request.post("/api/articles", {
+      headers: { "content-type": "application/json" },
+      data: { title: "Author1 Article A", body: "Content", author_id: author1.id },
+    });
+    await request.post("/api/articles", {
+      headers: { "content-type": "application/json" },
+      data: { title: "Author1 Article B", body: "Content", author_id: author1.id },
+    });
+    await request.post("/api/articles", {
+      headers: { "content-type": "application/json" },
+      data: { title: "Author2 Article A", body: "Content", author_id: author2.id },
+    });
+
+    // Fetch by_author scope for author1
+    const res = await request.get(`/api/articles/scoped/by-author/${author1.id}`);
+    expect(res.status()).toBe(200);
+    const result = await res.json();
+    expect(result.count).toBe(2);
+    expect(result.data.every((a: { author_id: number }) => a.author_id === author1.id)).toBe(true);
+
+    // Fetch by_author scope for author2
+    const res2 = await request.get(`/api/articles/scoped/by-author/${author2.id}`);
+    const result2 = await res2.json();
+    expect(result2.count).toBe(1);
+    expect(result2.data[0].author_id).toBe(author2.id);
+  });
+
+  // ========================================
+  // 5. Associations (has_many, belongs_to, has_one)
   // ========================================
   test("has_many: author.articles", async ({ request }) => {
     // Create author
@@ -169,7 +246,7 @@ test.describe("dsl-api ORM integration", () => {
   });
 
   // ========================================
-  // 4. Enum (status: draft/published/archived)
+  // 6. Enum (status: draft/published/archived)
   // ========================================
   test("enum: default status is draft", async ({ request }) => {
     const res = await request.post("/api/articles", {
@@ -227,7 +304,7 @@ test.describe("dsl-api ORM integration", () => {
   });
 
   // ========================================
-  // 5. Scopes
+  // 7. Scopes
   // ========================================
   test("scope: published and drafts", async ({ request }) => {
     // Create draft and published articles
@@ -257,7 +334,7 @@ test.describe("dsl-api ORM integration", () => {
   });
 
   // ========================================
-  // 6. Callbacks (before_save: generate_slug)
+  // 8. Callbacks (before_save: generate_slug)
   // ========================================
   test("callback: auto-generates slug from title", async ({ request }) => {
     const res = await request.post("/api/articles", {
@@ -291,7 +368,7 @@ test.describe("dsl-api ORM integration", () => {
   });
 
   // ========================================
-  // 7. Dirty Tracking
+  // 9. Dirty Tracking
   // ========================================
   test("dirty tracking: detects changes before save", async ({ request }) => {
     // Create article
@@ -317,7 +394,7 @@ test.describe("dsl-api ORM integration", () => {
   });
 
   // ========================================
-  // 8. Query Extensions
+  // 10. Query Extensions
   // ========================================
   test("where.not: excludes drafts", async ({ request }) => {
     // Create one published article
@@ -407,7 +484,46 @@ test.describe("dsl-api ORM integration", () => {
   });
 
   // ========================================
-  // 9. Full CRUD lifecycle with all features
+  // 11. Pagination (uses relative checks - DB may have pre-existing data)
+  // ========================================
+  test("pagination: returns correct page structure and meta", async ({ request }) => {
+    // Get current count
+    const beforeRes = await request.get("/api/articles?page=1&per=100");
+    const before = await beforeRes.json();
+    const countBefore = before.meta.total;
+
+    // Create 3 articles for pagination
+    for (let i = 1; i <= 3; i++) {
+      await request.post("/api/articles", {
+        headers: { "content-type": "application/json" },
+        data: { title: `Pagination Article ${i}`, body: `Body ${i}` },
+      });
+    }
+
+    // Verify total increased by 3
+    const afterRes = await request.get("/api/articles?page=1&per=2");
+    expect(afterRes.status()).toBe(200);
+    const page1 = await afterRes.json();
+    expect(page1.data.length).toBe(2);
+    expect(page1.meta.page).toBe(1);
+    expect(page1.meta.per).toBe(2);
+    expect(page1.meta.total).toBe(countBefore + 3);
+
+    // Page 2 should also have data
+    const page2Res = await request.get("/api/articles?page=2&per=2");
+    const page2 = await page2Res.json();
+    expect(page2.data.length).toBe(2);
+    expect(page2.meta.page).toBe(2);
+
+    // No overlap between pages
+    const page1Ids = page1.data.map((a: { id: number }) => a.id);
+    const page2Ids = page2.data.map((a: { id: number }) => a.id);
+    const overlap = page1Ids.filter((id: number) => page2Ids.includes(id));
+    expect(overlap.length).toBe(0);
+  });
+
+  // ========================================
+  // 12. Full CRUD lifecycle with all features
   // ========================================
   test("full lifecycle: create, update, scope, enum, delete", async ({ request }) => {
     // Create author
@@ -456,7 +572,7 @@ test.describe("dsl-api ORM integration", () => {
   });
 
   // ========================================
-  // 10. API metadata reflects all features
+  // 13. API metadata reflects all features
   // ========================================
   test("API metadata lists all ORM features", async ({ request }) => {
     const res = await request.get("/api");

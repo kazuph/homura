@@ -45,73 +45,6 @@ const NAMED_D1_STATEMENTS: Record<string, string> = {
 };
 const DEBUG_LONGJMP = false;
 
-/**
- * Split Ruby source into chunks at top-level class/end boundaries
- * and top-level $app.* route definitions to reduce longjmp pressure.
- */
-function splitRubyChunks(source: string): string[] {
-  const lines = source.split('\n');
-  const chunks: string[] = [];
-  let current: string[] = [];
-  let depth = 0;
-  let inClass = false;
-
-  const blockOpenRe = /^(class|module|def|if|unless|while|until|case|begin|for)\b/;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith('#') || trimmed === '') {
-      current.push(line);
-      continue;
-    }
-
-    const openMatch = blockOpenRe.test(trimmed);
-    const doBlock = /\bdo\s*(\|.*\|)?\s*$/.test(trimmed);
-    const isPostfix = /\b(if|unless|while|until)\b/.test(trimmed) &&
-      !/^(if|unless|while|until)\b/.test(trimmed);
-
-    // Start of a top-level class/module
-    if (/^(class|module)\s/.test(trimmed) && depth === 0) {
-      if (current.length > 0) {
-        const text = current.join('\n').trim();
-        if (text) chunks.push(text);
-        current = [];
-      }
-      inClass = true;
-    } else if (depth === 0 && !inClass && /^\$app\.\w+\s/.test(trimmed)) {
-      if (current.length > 0) {
-        const text = current.join('\n').trim();
-        if (text) chunks.push(text);
-        current = [];
-      }
-    }
-
-    current.push(line);
-
-    if (openMatch && !isPostfix) {
-      depth++;
-    } else if (doBlock) {
-      depth++;
-    }
-
-    if (trimmed === 'end' && depth > 0) {
-      depth--;
-      if (depth === 0 && inClass) {
-        chunks.push(current.join('\n'));
-        current = [];
-        inClass = false;
-      }
-    }
-  }
-
-  if (current.length > 0) {
-    const text = current.join('\n').trim();
-    if (text) chunks.push(text);
-  }
-
-  return chunks;
-}
-
 interface RubyRequestEnvelope {
   v: number;
   request: {
@@ -945,7 +878,9 @@ async function executeD1Ops(env: Env, ops: D1Op[]): Promise<LoopOpResult[]> {
       return { ok: false, error: `Unsupported D1 op: ${rawOp.op}` };
     } catch (e) {
       if (rawOp.op === 'transaction') {
-        try { await env.HOMURA_DB.prepare('ROLLBACK').run(); } catch {}
+        try { await env.HOMURA_DB.prepare('ROLLBACK').run(); } catch (rollbackErr) {
+          console.error('[homura] ROLLBACK failed:', rollbackErr);
+        }
       }
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
@@ -1017,12 +952,31 @@ let labelCounter = 1;
 
 // ─── mruby instance wrapper ───────────────────────────────────────
 
+interface HomuraWasmExports extends WebAssembly.Exports {
+  memory: WebAssembly.Memory;
+  homura_init: () => number;
+  homura_eval: () => number;
+  homura_load_irep?: (len: number) => number;
+  homura_handle_request: (len: number) => number;
+  homura_get_input_buffer: () => number;
+  homura_get_buffer_size: () => number;
+  homura_get_result: () => number;
+  homura_get_output_length: () => number;
+  homura_get_output_buffer: () => number;
+  homura_gc?: () => void;
+  homura_close: () => void;
+}
+
 class MRuby {
   private instance: WebAssembly.Instance | null = null;
 
-  private getMemory(): WebAssembly.Memory {
+  private getExports(): HomuraWasmExports {
     if (!this.instance) throw new Error('mruby not initialized');
-    return this.instance.exports.memory as WebAssembly.Memory;
+    return this.instance.exports as HomuraWasmExports;
+  }
+
+  private getMemory(): WebAssembly.Memory {
+    return this.getExports().memory;
   }
 
   private invokeWithLongjmpRetry<T>(label: string, fn: () => T): T {
@@ -1180,7 +1134,7 @@ class MRuby {
 
     const envImports = {
       __wasm_setjmp: (buf: number, sp: number): void => {
-        const memory = this.instance!.exports.memory as WebAssembly.Memory;
+        const memory = this.getExports().memory;
         const view = new DataView(memory.buffer);
         const label = labelCounter++;
 
@@ -1198,7 +1152,7 @@ class MRuby {
         }
       },
       __wasm_longjmp: (buf: number, value: number): void => {
-        const memory = this.instance!.exports.memory as WebAssembly.Memory;
+        const memory = this.getExports().memory;
         const view = new DataView(memory.buffer);
         view.setInt32(buf + 8, value || 1, true);
         if (DEBUG_LONGJMP) {
@@ -1212,7 +1166,7 @@ class MRuby {
         throw new WasmLongjmpException(buf, value || 1);
       },
       __wasm_setjmp_test: (buf: number, curLabel: number): number => {
-        const memory = this.instance!.exports.memory as WebAssembly.Memory;
+        const memory = this.getExports().memory;
         const view = new DataView(memory.buffer);
         const storedLabel = view.getInt32(buf, true);
         if (storedLabel === curLabel) {
@@ -1246,7 +1200,7 @@ class MRuby {
       env: envImports,
     });
 
-    const exports = this.instance.exports as any;
+    const exports = this.getExports();
     const result = exports.homura_init();
     if (!result) {
       throw new Error('Failed to initialize mruby VM');
@@ -1260,7 +1214,7 @@ class MRuby {
   eval(code: string): string {
     if (!this.instance) throw new Error('mruby not initialized');
 
-    const exports = this.instance.exports as any;
+    const exports = this.getExports();
     const memory = this.getMemory();
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
@@ -1304,7 +1258,7 @@ class MRuby {
   loadIrep(mrbBase64: string): string {
     if (!this.instance) throw new Error('mruby not initialized');
 
-    const exports = this.instance.exports as any;
+    const exports = this.getExports();
     if (!exports.homura_load_irep) {
       throw new Error('homura_load_irep not available - rebuild mruby.wasm');
     }
@@ -1377,7 +1331,7 @@ class MRuby {
   handleRequest(env: RubyRequestEnvelope): RubyResponse {
     if (!this.instance) throw new Error('mruby not initialized');
 
-    const exports = this.instance.exports as any;
+    const exports = this.getExports();
     const memory = this.getMemory();
 
     const encoded = mpEncode(env);
@@ -1405,7 +1359,7 @@ class MRuby {
         success,
         outputLen,
       });
-      const currentMemory = this.instance.exports.memory as WebAssembly.Memory;
+      const currentMemory = this.getExports().memory;
       const decoder = new TextDecoder();
       let output = '';
       if (outputLen > 0) {
@@ -1451,7 +1405,7 @@ class MRuby {
   /** Run a full GC cycle to reclaim mruby heap between requests. */
   gc(): void {
     if (this.instance) {
-      const exports = this.instance.exports as any;
+      const exports = this.getExports();
       if (typeof exports.homura_gc === 'function') {
         exports.homura_gc();
       }
@@ -1460,7 +1414,7 @@ class MRuby {
 
   close(): void {
     if (this.instance) {
-      const exports = this.instance.exports as any;
+      const exports = this.getExports();
       exports.homura_close();
       this.instance = null;
     }
@@ -1699,10 +1653,7 @@ export default {
         stack: error instanceof Error ? error.stack : undefined,
       }));
       return new Response(
-        JSON.stringify({
-          error: 'Internal Server Error',
-          message: error instanceof Error ? error.message : String(error),
-        }),
+        JSON.stringify({ error: 'Internal Server Error' }),
         { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
     }

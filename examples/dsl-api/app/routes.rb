@@ -331,6 +331,24 @@ $app.post "/api/tags" do |c|
   end
 end
 
+# ===== by_author scope =====
+
+$app.get "/api/articles/scoped/by-author/:author_id" do |c|
+  author_id = c.req.param("author_id").to_i
+  articles = Article.by_author(author_id).order("id DESC").all(c.db)
+  c.json({ data: articles.map { |a| a.to_h }, count: articles.length })
+end
+
+# ===== Test helpers (DB reset) =====
+
+$app.post "/api/test/reset-db" do |c|
+  c.db.run("DELETE FROM articles", [])
+  c.db.run("DELETE FROM profiles", [])
+  c.db.run("DELETE FROM authors", [])
+  c.db.run("DELETE FROM tags", [])
+  c.json({ ok: true })
+end
+
 # ===== Home + API docs =====
 
 $app.get "/" do |c|
