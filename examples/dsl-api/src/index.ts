@@ -26,6 +26,7 @@ const MAX_LOOP_ITERATIONS = 16;
 const MAX_OPS_PER_LOOP = 64;
 const MAX_SQL_LENGTH = 5000;
 const MAX_SQL_BIND_COUNT = 64;
+const D1_QUERY_TIMEOUT_MS = 5000;
 const MAX_LONGJMP_RETRIES = 4096;
 const NAMED_D1_STATEMENTS: Record<string, string> = {
   'stmt:todo_insert_returning':
@@ -805,6 +806,15 @@ async function executeD1Ops(env: Env, ops: D1Op[]): Promise<LoopOpResult[]> {
     return resolved;
   };
 
+  const withD1Timeout = <T>(promise: Promise<T>): Promise<T> => {
+    return Promise.race([
+      promise,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`D1 query timeout (${D1_QUERY_TIMEOUT_MS}ms)`)), D1_QUERY_TIMEOUT_MS)
+      ),
+    ]);
+  };
+
   const executeSingle = async (rawOp: D1Op): Promise<{ ok: boolean; result?: unknown; error?: string }> => {
     if (rawOp.op !== 'batch' && rawOp.op !== 'transaction') {
       const resolvedSql = typeof rawOp.sql === 'string' ? resolveD1Sql(rawOp.sql) : rawOp.sql;
@@ -820,7 +830,7 @@ async function executeD1Ops(env: Env, ops: D1Op[]): Promise<LoopOpResult[]> {
       if (rawOp.op === 'batch' || rawOp.op === 'transaction') {
         const statements = rawOp.statements || [];
         if (rawOp.op === 'transaction') {
-          await env.HOMURA_DB.prepare('BEGIN').run();
+          await withD1Timeout(env.HOMURA_DB.prepare('BEGIN').run());
         }
         const statementResults: Array<{ op: string; ok: boolean; result?: unknown; error?: string }> = [];
         for (const stmt of statements) {
@@ -834,16 +844,16 @@ async function executeD1Ops(env: Env, ops: D1Op[]): Promise<LoopOpResult[]> {
 
           const statement = env.HOMURA_DB.prepare(resolvedSql).bind(...(stmt.binds ?? []));
           if (stmt.op === 'all') {
-            const result = await statement.all();
+            const result = await withD1Timeout(statement.all());
             statementResults.push({ op: stmt.op, ok: true, result });
           } else if (stmt.op === 'first' || stmt.op === 'get') {
-            const result = await statement.first();
+            const result = await withD1Timeout(statement.first());
             statementResults.push({ op: stmt.op, ok: true, result });
           } else if (stmt.op === 'run') {
-            const result = await statement.run();
+            const result = await withD1Timeout(statement.run());
             statementResults.push({ op: stmt.op, ok: true, result: normalizeRunResult(result) ?? result });
           } else if (stmt.op === 'exec') {
-            const result = await env.HOMURA_DB.exec(stmt.sql);
+            const result = await withD1Timeout(env.HOMURA_DB.exec(stmt.sql));
             statementResults.push({ op: stmt.op, ok: true, result });
           } else {
             throw new Error(`Unsupported D1 statement op: ${stmt.op}`);
@@ -851,7 +861,7 @@ async function executeD1Ops(env: Env, ops: D1Op[]): Promise<LoopOpResult[]> {
         }
 
         if (rawOp.op === 'transaction') {
-          await env.HOMURA_DB.prepare('COMMIT').run();
+          await withD1Timeout(env.HOMURA_DB.prepare('COMMIT').run());
         }
 
         return { ok: true, result: statementResults };
@@ -860,19 +870,19 @@ async function executeD1Ops(env: Env, ops: D1Op[]): Promise<LoopOpResult[]> {
       const resolvedSql = resolveD1Sql(rawOp.sql);
       const statement = env.HOMURA_DB.prepare(resolvedSql).bind(...(rawOp.binds ?? []));
       if (rawOp.op === 'all') {
-        const result = await statement.all();
+        const result = await withD1Timeout(statement.all());
         return { ok: true, result };
       }
       if (rawOp.op === 'get' || rawOp.op === 'first') {
-        const result = await statement.first();
+        const result = await withD1Timeout(statement.first());
         return { ok: true, result };
       }
       if (rawOp.op === 'run') {
-        const result = await statement.run();
+        const result = await withD1Timeout(statement.run());
         return { ok: true, result: normalizeRunResult(result) ?? result };
       }
       if (rawOp.op === 'exec') {
-        const result = await env.HOMURA_DB.exec(rawOp.sql);
+        const result = await withD1Timeout(env.HOMURA_DB.exec(rawOp.sql));
         return { ok: true, result };
       }
       return { ok: false, error: `Unsupported D1 op: ${rawOp.op}` };
