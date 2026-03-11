@@ -251,6 +251,33 @@ select.form-control { cursor: pointer; }
 }
 .page-header h1 { font-size: 1.5rem; }
 
+/* Guide */
+.guide-section { margin-bottom: 0.5rem; }
+.guide-section h2 { font-size: 1.15rem; margin-bottom: 0.75rem; color: var(--accent); }
+.guide-section p { margin-bottom: 0.75rem; line-height: 1.6; }
+.guide-section pre {
+  background: #0d1117;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  overflow-x: auto;
+  margin-bottom: 0.75rem;
+}
+.guide-section code {
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 0.85rem;
+  color: #e6edf3;
+}
+.guide-section p code {
+  background: #21262d;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+.guide-section ul { margin-bottom: 0.75rem; }
+.guide-section li { padding: 0.3rem 0; }
+.guide-section li code { font-size: 0.85rem; color: var(--accent); }
+
 /* Footer */
 footer {
   text-align: center;

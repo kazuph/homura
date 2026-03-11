@@ -50,6 +50,7 @@ const Layout = ({ title, children, activePage }: { title: string; children: unkn
           <span className="logo">Homura Todo</span>
           <a href="/" className={activePage === 'index' ? 'active' : ''}>Todos</a>
           <a href="/categories" className={activePage === 'categories' ? 'active' : ''}>Categories</a>
+          <a href="/guide" className={activePage === 'guide' ? 'active' : ''}>ORM Guide</a>
           <a href="/api/stats" target="_blank" rel="noreferrer">API Stats</a>
         </nav>
         {children}
@@ -379,6 +380,183 @@ const CategoriesPage = (props: Props) => {
   );
 };
 
+// ===== ORM Guide Page =====
+const GuidePage = (_props: Props) => (
+  <>
+    <div className="page-header">
+      <h1>Homura ORM Guide</h1>
+    </div>
+
+    <div className="guide">
+      <section className="panel guide-section">
+        <h2>Getting Started</h2>
+        <p>Homura::Model is an ActiveRecord-inspired ORM for mruby on Cloudflare Workers. Define models, run queries, and manage data with a familiar Ruby DSL.</p>
+        <pre><code>{`class Todo < Homura::Model
+  table :todos
+  column :id, :integer
+  column :title, :string
+  column :status, :integer
+end`}</code></pre>
+      </section>
+
+      <section className="panel guide-section">
+        <h2>CRUD Operations</h2>
+        <pre><code>{`# Create
+todo = Todo.new({ title: "Buy coffee" })
+todo.save(c.db)
+
+# Read
+todo = Todo.find(c.db, 1)
+todos = Todo.all(c.db)
+
+# Update
+todo.title = "Buy Ethiopian coffee"
+todo.save(c.db)
+
+# Delete
+todo.destroy(c.db)`}</code></pre>
+      </section>
+
+      <section className="panel guide-section">
+        <h2>Validations</h2>
+        <p>Validate data before saving. Supports <code>presence</code>, <code>length</code>, <code>numericality</code>, <code>format</code>, <code>inclusion</code>, <code>exclusion</code>, and custom validators.</p>
+        <pre><code>{`validates :title, presence: true
+validates :title, length: { minimum: 1, maximum: 100 }
+validates :priority, numericality: { greater_than: 0 }
+validates :status, inclusion: { in: ["draft", "published"] }
+validate :custom_check_method`}</code></pre>
+        <p>Check validity:</p>
+        <pre><code>{`todo = Todo.new({ title: "" })
+todo.valid?    #=> false
+todo.errors    #=> ["title can't be blank"]`}</code></pre>
+      </section>
+
+      <section className="panel guide-section">
+        <h2>Enum</h2>
+        <p>Map integer columns to named values with predicate and bang methods.</p>
+        <pre><code>{`enum :status, [:pending, :in_progress, :done]
+
+todo.status        #=> :pending (symbol)
+todo.status_value  #=> 0 (integer)
+todo.pending?      #=> true
+todo.done!         # sets status to 2
+Todo.statuses      #=> { "pending"=>0, "in_progress"=>1, "done"=>2 }`}</code></pre>
+      </section>
+
+      <section className="panel guide-section">
+        <h2>Scopes</h2>
+        <p>Define reusable, chainable query fragments.</p>
+        <pre><code>{`scope :pending, -> { where(status: 0) }
+scope :high_priority, -> { where(priority: 3) }
+scope :by_category, ->(id) { where(category_id: id) }
+
+Todo.pending.order("id DESC").all(c.db)
+Todo.high_priority.by_category(1).all(c.db)`}</code></pre>
+      </section>
+
+      <section className="panel guide-section">
+        <h2>Associations</h2>
+        <p>Define relationships between models.</p>
+        <pre><code>{`class Category < Homura::Model
+  has_many :todos
+end
+
+class Todo < Homura::Model
+  belongs_to :category
+end
+
+category.todos(c.db)    # SELECT * FROM todos WHERE category_id = ?
+todo.category(c.db)     # SELECT * FROM categories WHERE id = ?`}</code></pre>
+      </section>
+
+      <section className="panel guide-section">
+        <h2>Callbacks</h2>
+        <p>Hook into the model lifecycle. Supports <code>before/after</code> for <code>validation</code>, <code>save</code>, <code>create</code>, <code>update</code>, <code>destroy</code>.</p>
+        <pre><code>{`before_save :update_timestamp
+
+def update_timestamp
+  @attributes[:updated_at] = Time.now.to_i.to_s
+end`}</code></pre>
+      </section>
+
+      <section className="panel guide-section">
+        <h2>Query Extensions</h2>
+        <pre><code>{`# where.not
+Todo.where.not(status: 2).all(c.db)
+
+# pluck (returns flat array)
+Todo.pluck(:title, c.db)  #=> ["Buy coffee", "Write tests"]
+
+# ids
+Todo.ids(c.db)  #=> [1, 2, 3]
+
+# exists?
+Todo.where(title: "X").exists?(c.db)  #=> true/false
+
+# find_by
+Todo.find_by(c.db, title: "X")  # first match or nil
+
+# find_or_create_by
+Todo.find_or_create_by(c.db, title: "X")
+
+# count / order / limit / offset
+Todo.where(status: 0).count(c.db)
+Todo.order("id DESC").limit(10).offset(20).all(c.db)`}</code></pre>
+      </section>
+
+      <section className="panel guide-section">
+        <h2>Dirty Tracking</h2>
+        <p>Track attribute changes before saving.</p>
+        <pre><code>{`todo = Todo.find(c.db, 1)
+todo.title = "New title"
+
+todo.changed?           #=> true
+todo.title_changed?     #=> true
+todo.title_was          #=> "Old title"
+todo.changes            #=> { title: ["Old title", "New title"] }
+todo.changed_attributes #=> [:title]`}</code></pre>
+      </section>
+
+      <section className="panel guide-section">
+        <h2>This App's Models</h2>
+        <p>The Todo app you're using right now demonstrates all these features:</p>
+        <pre><code>{`class Category < Homura::Model
+  table :categories
+  validates :name, presence: true, length: { minimum: 1, maximum: 50 }
+  has_many :todos
+  before_save :strip_name
+end
+
+class Todo < Homura::Model
+  table :todos
+  validates :title, presence: true, length: { minimum: 1, maximum: 100 }
+  belongs_to :category
+  enum :status, [:pending, :in_progress, :done]
+  scope :pending, -> { where(status: 0) }
+  scope :done, -> { where(status: 2) }
+  scope :high_priority, -> { where(priority: 3) }
+  before_save :update_timestamp
+end`}</code></pre>
+      </section>
+
+      <section className="panel guide-section">
+        <h2>JSON API Endpoints</h2>
+        <p>This app also exposes JSON APIs demonstrating ORM features:</p>
+        <ul style="list-style: none; padding: 0;">
+          <li><code>GET /api/stats</code> - count + scopes</li>
+          <li><code>GET /api/todos</code> - JSON list</li>
+          <li><code>GET /api/todos/pluck-titles</code> - pluck demo</li>
+          <li><code>GET /api/todos/ids</code> - ids demo</li>
+          <li><code>GET /api/todos/query/exists?title=...</code> - exists? demo</li>
+          <li><code>POST /api/todos/find-or-create</code> - find_or_create_by demo</li>
+          <li><code>GET /api/todos/not-done</code> - where.not demo</li>
+          <li><code>PUT /api/todos/:id/track-changes</code> - dirty tracking demo</li>
+        </ul>
+      </section>
+    </div>
+  </>
+);
+
 // ===== Template registry =====
 const templates: Record<string, (props: Props) => string> = {
   index: (props) => renderToString(
@@ -399,6 +577,11 @@ const templates: Record<string, (props: Props) => string> = {
   categories: (props) => renderToString(
     <Layout title="Categories - Homura Todo" activePage="categories">
       <CategoriesPage {...props} />
+    </Layout>
+  ),
+  guide: (props) => renderToString(
+    <Layout title="ORM Guide - Homura Todo" activePage="guide">
+      <GuidePage {...props} />
     </Layout>
   ),
 };

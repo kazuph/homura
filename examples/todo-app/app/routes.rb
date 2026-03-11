@@ -192,6 +192,11 @@ $app.post "/categories/:id/delete" do |c|
   c.redirect("/categories")
 end
 
+# GET /guide - ORM Guide page
+$app.get "/guide" do |c|
+  c.jsx("guide", {})
+end
+
 # ===== JSON API (ORM feature demos) =====
 
 # GET /api/stats - Statistics using count + scopes
