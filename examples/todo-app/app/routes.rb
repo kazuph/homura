@@ -218,6 +218,64 @@ $app.get "/api/todos" do |c|
   c.json({ data: todos.map { |t| t.to_h } })
 end
 
+# POST /api/todos - Create todo via JSON (inline add)
+$app.post "/api/todos" do |c|
+  body = c.json_body || {}
+  title = (body["title"] || "").to_s.strip
+
+  if title == ""
+    c.json({ error: "Title is required" }, status: 422)
+  else
+    todo = Todo.new({
+      title: title,
+      description: body["description"] || "",
+      status: 0,
+      priority: (body["priority"] || 2).to_i,
+      category_id: body["category_id"] ? body["category_id"].to_i : nil
+    })
+
+    if todo.valid?
+      todo.save(c.db)
+      c.json({ ok: true, todo: todo.to_h })
+    else
+      c.json({ error: todo.errors.first, errors: todo.errors }, status: 422)
+    end
+  end
+end
+
+# POST /api/todos/:id/toggle - Toggle status via JSON
+$app.post "/api/todos/:id/toggle" do |c|
+  id = c.req.param("id").to_i
+  todo = Todo.find(c.db, id)
+  unless todo
+    c.json({ error: "Not found" }, status: 404)
+  else
+    current = todo.status_value || 0
+    next_status = (current + 1) % 3
+    if next_status == 0
+      todo.pending!
+    elsif next_status == 1
+      todo.in_progress!
+    else
+      todo.done!
+    end
+    todo.save(c.db)
+    c.json({ ok: true, todo: todo.to_h })
+  end
+end
+
+# DELETE /api/todos/:id - Delete via JSON
+$app.delete "/api/todos/:id" do |c|
+  id = c.req.param("id").to_i
+  todo = Todo.find(c.db, id)
+  if todo
+    todo.destroy(c.db)
+    c.json({ ok: true })
+  else
+    c.json({ error: "Not found" }, status: 404)
+  end
+end
+
 # GET /api/todos/pluck-titles - pluck demo
 $app.get "/api/todos/pluck-titles" do |c|
   titles = Todo.order("id ASC").pluck(:title, c.db)

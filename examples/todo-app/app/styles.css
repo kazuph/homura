@@ -278,6 +278,24 @@ select.form-control { cursor: pointer; }
 .guide-section li { padding: 0.3rem 0; }
 .guide-section li code { font-size: 0.85rem; color: var(--accent); }
 
+/* Error Toast */
+.error-toast {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  background: var(--danger);
+  color: #fff;
+  padding: 0.75rem 1.25rem;
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+  z-index: 9999;
+  animation: toast-in 0.3s ease;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(1rem); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 /* Footer */
 footer {
   text-align: center;

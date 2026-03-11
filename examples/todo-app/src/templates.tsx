@@ -25,8 +25,92 @@ interface CategoryItem {
 
 const STATUS_LABELS: Record<number, string> = { 0: 'Pending', 1: 'In Progress', 2: 'Done' };
 const STATUS_CLASSES: Record<number, string> = { 0: 'badge-pending', 1: 'badge-in-progress', 2: 'badge-done' };
+const STATUS_ICONS: Record<number, string> = { 0: '\u2b55', 1: '\u{1f504}', 2: '\u2705' };
 const PRIORITY_LABELS: Record<number, string> = { 1: 'Low', 2: 'Medium', 3: 'High' };
 const PRIORITY_CLASSES: Record<number, string> = { 1: 'badge-priority-1', 2: 'badge-priority-2', 3: 'badge-priority-3' };
+
+// Inline JS for fetch-based todo operations (no page transitions)
+const INLINE_TODO_JS = `
+(function(){
+  var sending=false;
+  function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
+
+  // Quick add
+  var form=document.getElementById('quick-add-form');
+  var input=document.getElementById('quick-title');
+  var btn=document.getElementById('quick-add-btn');
+  if(form)form.addEventListener('submit',function(e){
+    e.preventDefault();
+    if(sending)return;
+    var t=input.value.trim();
+    if(!t){input.focus();return}
+    sending=true;btn.disabled=true;btn.textContent='...';
+    fetch('/api/todos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t})})
+    .then(function(r){return r.json()})
+    .then(function(d){
+      if(d.ok&&d.todo){
+        input.value='';input.focus();
+        var list=document.querySelector('.todo-list');
+        if(!list){
+          var es=document.querySelector('.empty-state');if(es)es.remove();
+          var p=document.createElement('div');p.className='panel';
+          document.querySelector('.shell main, .shell').appendChild(p);
+          list=document.createElement('ul');list.className='todo-list';p.appendChild(list);
+        }
+        var li=document.createElement('li');li.className='todo-item';li.dataset.id=d.todo.id;
+        li.innerHTML='<button class="btn btn-toggle" data-toggle="'+d.todo.id+'">\\u2b55</button>'
+          +'<span class="todo-title">'+esc(d.todo.title)+'</span>'
+          +'<div class="todo-meta"><span class="badge badge-pending">Pending</span>'
+          +'<a href="/todos/'+d.todo.id+'/edit" class="btn btn-sm">Edit</a>'
+          +'<button class="btn btn-sm btn-danger" data-del="'+d.todo.id+'">Del</button></div>';
+        list.insertBefore(li,list.firstChild);
+        updCount('.stat-all',1);updCount('.stat-pending',1);
+      }else{showErr(d.error||'Failed')}
+    }).catch(function(e){showErr(e.message)})
+    .finally(function(){sending=false;btn.disabled=false;btn.textContent='Add'});
+  });
+
+  // Toggle via event delegation
+  document.addEventListener('click',function(e){
+    var b=e.target.closest('[data-toggle]');
+    if(!b||sending)return;
+    e.preventDefault();
+    var id=b.dataset.toggle;
+    sending=true;
+    fetch('/api/todos/'+id+'/toggle',{method:'POST',headers:{'Content-Type':'application/json'}})
+    .then(function(r){return r.json()})
+    .then(function(d){
+      if(d.ok&&d.todo){
+        var li=b.closest('.todo-item');
+        var icons={0:'\\u2b55',1:'\\ud83d\\udd04',2:'\\u2705'};
+        var labels={0:'Pending',1:'In Progress',2:'Done'};
+        var classes={0:'badge-pending',1:'badge-in-progress',2:'badge-done'};
+        b.textContent=icons[d.todo.status]||'\\u2b55';
+        var badge=li.querySelector('.badge');
+        if(badge){badge.className='badge '+classes[d.todo.status];badge.textContent=labels[d.todo.status]}
+        if(d.todo.status===2)li.classList.add('done');else li.classList.remove('done');
+      }
+    }).catch(function(){}).finally(function(){sending=false});
+  });
+
+  // Delete via event delegation
+  document.addEventListener('click',function(e){
+    var b=e.target.closest('[data-del]');
+    if(!b||sending)return;
+    e.preventDefault();
+    var id=b.dataset.del;
+    sending=true;
+    fetch('/api/todos/'+id,{method:'DELETE'})
+    .then(function(r){return r.json()})
+    .then(function(d){
+      if(d.ok){var li=b.closest('.todo-item');if(li)li.remove();updCount('.stat-all',-1)}
+    }).catch(function(){}).finally(function(){sending=false});
+  });
+
+  function updCount(sel,delta){var el=document.querySelector(sel+' .count');if(el)el.textContent=parseInt(el.textContent||'0')+delta}
+  function showErr(msg){var d=document.createElement('div');d.className='error-toast';d.textContent=msg;document.body.appendChild(d);setTimeout(function(){d.remove()},3000)}
+})();
+`;
 
 function escapeHtml(str: string): string {
   return String(str || '')
@@ -79,20 +163,31 @@ const IndexPage = (props: Props) => {
     <>
       <div className="page-header">
         <h1>Todos</h1>
-        <a href="/todos/new" className="btn btn-primary">+ New Todo</a>
+        <a href="/todos/new" className="btn">+ Full Form</a>
+      </div>
+
+      <div className="panel" id="inline-add">
+        <form id="quick-add-form" className="form-row" style="gap: 0.5rem; align-items: flex-end; margin-bottom: 0;">
+          <div className="form-group" style="flex: 1; margin-bottom: 0;">
+            <input type="text" id="quick-title" className="form-control"
+                   placeholder="What needs to be done? Press Enter to add" autoComplete="off" />
+          </div>
+          <button type="submit" id="quick-add-btn" className="btn btn-primary"
+                  style="margin-bottom: 0; white-space: nowrap;">Add</button>
+        </form>
       </div>
 
       <div className="stats-bar">
-        <a href="/" className={'stat-badge' + (currentStatus === '' ? ' active' : '')}>
+        <a href="/" className={'stat-badge stat-all' + (currentStatus === '' ? ' active' : '')}>
           All <span className="count">{stats.total}</span>
         </a>
-        <a href="/?status=pending" className={'stat-badge' + (currentStatus === 'pending' ? ' active' : '')}>
+        <a href="/?status=pending" className={'stat-badge stat-pending' + (currentStatus === 'pending' ? ' active' : '')}>
           Pending <span className="count">{stats.pending}</span>
         </a>
-        <a href="/?status=in_progress" className={'stat-badge' + (currentStatus === 'in_progress' ? ' active' : '')}>
+        <a href="/?status=in_progress" className={'stat-badge stat-in-progress' + (currentStatus === 'in_progress' ? ' active' : '')}>
           In Progress <span className="count">{stats.in_progress}</span>
         </a>
-        <a href="/?status=done" className={'stat-badge' + (currentStatus === 'done' ? ' active' : '')}>
+        <a href="/?status=done" className={'stat-badge stat-done' + (currentStatus === 'done' ? ' active' : '')}>
           Done <span className="count">{stats.done}</span>
         </a>
       </div>
@@ -125,12 +220,10 @@ const IndexPage = (props: Props) => {
             {todos.map((todo: TodoItem) => {
               const cat = todo.category_id ? catMap[todo.category_id] : null;
               return (
-                <li className={'todo-item' + (todo.status === 2 ? ' done' : '')}>
-                  <form method="post" action={'/todos/' + todo.id + '/toggle'}>
-                    <button type="submit" className="btn btn-toggle" title="Toggle status">
-                      {todo.status === 2 ? '\u2705' : todo.status === 1 ? '\u{1f504}' : '\u2b55'}
-                    </button>
-                  </form>
+                <li className={'todo-item' + (todo.status === 2 ? ' done' : '')} data-id={String(todo.id)}>
+                  <button className="btn btn-toggle" data-toggle={String(todo.id)} title="Toggle status">
+                    {STATUS_ICONS[todo.status || 0]}
+                  </button>
                   <span className="todo-title">{escapeHtml(todo.title)}</span>
                   <div className="todo-meta">
                     {cat && (
@@ -148,9 +241,7 @@ const IndexPage = (props: Props) => {
                       <span style="color: var(--text-muted); font-size: 0.75rem;">{escapeHtml(todo.due_date)}</span>
                     )}
                     <a href={'/todos/' + todo.id + '/edit'} className="btn btn-sm">Edit</a>
-                    <form method="post" action={'/todos/' + todo.id + '/delete'} style="display:inline;">
-                      <button type="submit" className="btn btn-sm btn-danger">Del</button>
-                    </form>
+                    <button className="btn btn-sm btn-danger" data-del={String(todo.id)}>Del</button>
                   </div>
                 </li>
               );
@@ -158,6 +249,7 @@ const IndexPage = (props: Props) => {
           </ul>
         </div>
       )}
+      <script dangerouslySetInnerHTML={{ __html: INLINE_TODO_JS }} />
     </>
   );
 };
