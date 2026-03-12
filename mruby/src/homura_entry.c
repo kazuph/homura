@@ -16,6 +16,7 @@
 #include <mruby/array.h>
 #include <mruby/variable.h>
 #include <mruby/error.h>
+#include <mruby/irep.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -26,7 +27,7 @@
 static mrb_state *mrb = NULL;
 
 // Buffers for input/output
-#define HOMURA_BUFFER_SIZE 131072
+#define HOMURA_BUFFER_SIZE 262144
 static uint8_t input_buffer[HOMURA_BUFFER_SIZE];
 static uint8_t output_buffer[HOMURA_BUFFER_SIZE];
 static int output_length = 0;

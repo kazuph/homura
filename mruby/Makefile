@@ -20,7 +20,7 @@ MRUBY_INCLUDE = -I$(MRUBY_SRC_DIR)/include -I$(MRUBY_BUILD_DIR)/include
 HOMURA_ENTRY = src/homura_entry.c
 WASI_CC = $(WASI_SDK_PATH)/bin/clang
 CFLAGS = -O2 --target=wasm32-wasi -fno-exceptions -D_WASI_EMULATED_SIGNAL -DMRB_NO_STDIO -mllvm -wasm-enable-sjlj
-LDFLAGS = -Wl,--export-all -Wl,--no-entry -Wl,--allow-undefined -nostartfiles
+LDFLAGS = -Wl,--export-all -Wl,--no-entry -Wl,--allow-undefined -nostartfiles -Wl,-z,stack-size=1048576 -Wl,--initial-memory=33554432
 
 .PHONY: all clean setup check-wasi-sdk
 

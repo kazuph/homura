@@ -1297,8 +1297,6 @@ class MRuby {
       return 0;
     });
 
-    jmpBufRegistry.clear();
-
     const currentMemory = this.getMemory();
     const resultPtr = exports.homura_get_result();
     const memoryView = new Uint8Array(currentMemory.buffer);
@@ -1445,7 +1443,7 @@ let requestCount = 0;
 let precompiledLoadingEnabled = HAS_PRECOMPILED;
 // Proactively recycle WASM instance every N requests to prevent memory corruption.
 // mruby WASM instances degrade after ~20 requests, producing garbled MessagePack data.
-const MAX_REQUESTS_BEFORE_RECYCLE = 20;
+const MAX_REQUESTS_BEFORE_RECYCLE = 8;
 
 // Mutex to serialize access to the mruby WASM instance.
 // Without this, concurrent requests interleave at await points (D1 ops),
@@ -1577,8 +1575,9 @@ export default {
       try {
         await ensureMrubyReady();
       } catch (initError) {
+        // Init failed → full reset and retry once
         console.warn('[homura] Init failed, retrying with fresh instance:', initError);
-        await resetAndReinit();
+        await resetAndReinit(); // 2nd failure → throw → 500
       }
 
       // Build env as structured data (NO string interpolation / eval)
@@ -1612,6 +1611,7 @@ export default {
         try {
           rawResult = mruby.handleRequest(requestEnvelope);
         } catch (wasmError) {
+          // WASM memory corruption → destroy instance
           console.error(`[homura] WASM error (attempt ${attempt}), resetting:`, wasmError);
           await resetAndReinit();
           throw wasmError;
@@ -1619,6 +1619,7 @@ export default {
         try {
           currentResult = validateRubyResponse(rawResult);
         } catch (validationError) {
+          // Garbled response = WASM memory corruption
           console.error(`[homura] Garbled response (attempt ${attempt}), resetting:`, validationError);
           await resetAndReinit();
           throw validationError;
@@ -1724,6 +1725,7 @@ export default {
         return await executeRequest(1);
       } catch (firstError) {
         console.warn('[homura] Request failed (attempt 1), retrying with fresh WASM:', firstError);
+        // resetAndReinit already called inside executeRequest on WASM/garbled errors
         return await executeRequest(2);
       }
       }); // end withMrubyLock

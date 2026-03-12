@@ -1,0 +1,20 @@
+{
+  "name": "homura-todo-app",
+  "version": "0.1.0",
+  "description": "Todo app example showcasing Homura::Model ORM features",
+  "type": "module",
+  "scripts": {
+    "bundle:ruby": "node scripts/bundle-ruby.js",
+    "db:migrate:local": "wrangler d1 migrations apply homura-todo-db --local",
+    "build:mruby": "cd ../../mruby && make",
+    "build": "pnpm run bundle:ruby && pnpm run build:mruby",
+    "dev": "pnpm run bundle:ruby && wrangler dev",
+    "dev:e2e": "pnpm run bundle:ruby && pnpm run db:migrate:local && wrangler dev --local --port 8793",
+    "test:e2e": "pnpm --dir ../.. exec playwright test e2e/todo-app.spec.ts --config e2e/playwright.todo-app.config.ts",
+    "deploy": "pnpm run build && wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.99.0"
+  },
+  "license": "MIT"
+}
