@@ -16,4 +16,4 @@ globs = ["**/*.wasm"]
 binding = "HOMURA_DB"
 # NOTE: This ID is environment-specific. Replace with your own after `wrangler d1 create`
 database_name = "homura-todo-db"
-database_id = "07887fda-7726-4e5f-90ea-4a5ca5ff603f"
+database_id = "YOUR_D1_DATABASE_ID"

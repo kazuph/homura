@@ -5,4 +5,5 @@ compatibility_date = "2024-12-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "homura-todo-db"
-database_id = "07887fda-7726-4e5f-90ea-4a5ca5ff603f"
+# NOTE: Replace with your own after `wrangler d1 create`
+database_id = "YOUR_D1_DATABASE_ID"

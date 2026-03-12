@@ -2224,7 +2224,7 @@ export const HOMURA_MODEL = `class Homura
         @distinct_flag = false
       end
 
-      def where(conditions = {})
+      def where(conditions = nil)
         return WhereChain.new(self) if conditions.nil?
         return self unless conditions.is_a?(Hash)
         keys = conditions.keys
@@ -2241,7 +2241,9 @@ export const HOMURA_MODEL = `class Homura
 
       def order(order_clause)
         text = order_clause.to_s
-        @order_clause = text.empty? ? nil : text
+        return self if text.empty?
+        validate_order_clause(text)
+        @order_clause = text
         self
       end
 
@@ -2261,7 +2263,9 @@ export const HOMURA_MODEL = `class Homura
         @select_columns = []
         index = 0
         while index < columns.length
-          @select_columns << columns[index].to_s
+          col = columns[index].to_s
+          @model.validate_column(col) unless col == "*"
+          @select_columns << col
           index += 1
         end
         self
@@ -2271,7 +2275,9 @@ export const HOMURA_MODEL = `class Homura
         values = []
         index = 0
         while index < columns.length
-          values << columns[index].to_s
+          col = columns[index].to_s
+          @model.validate_column(col)
+          values << col
           index += 1
         end
         @group_clause = values.empty? ? nil : values.join(", ")
@@ -2279,8 +2285,9 @@ export const HOMURA_MODEL = `class Homura
       end
 
       def having(clause, *binds)
-        @having_clause = clause.to_s
-        @having_clause = nil if @having_clause.empty?
+        text = clause.to_s
+        validate_sql_fragment(text)
+        @having_clause = text.empty? ? nil : text
         @having_binds = binds
         self
       end
@@ -2436,10 +2443,73 @@ export const HOMURA_MODEL = `class Homura
       end
 
       def reverse_order_clause
-        return "id DESC" if @order_clause.nil? || @order_clause.empty?
-        return @order_clause.gsub(" DESC", " ASC") if @order_clause.include?(" DESC")
-        return @order_clause.gsub(" ASC", " DESC") if @order_clause.include?(" ASC")
-        @order_clause + " DESC"
+        return "id DESC" if @order_clause.nil? || @order_clause.strip.empty?
+
+        segments = @order_clause.split(",")
+        reversed = []
+        index = 0
+        while index < segments.length
+          part = segments[index].strip
+          unless part.empty?
+            tokens = part.split(" ")
+            col = tokens[0]
+            dir = tokens[1]
+            new_dir = if dir && dir.upcase == "ASC"
+              "DESC"
+            elsif dir && dir.upcase == "DESC"
+              "ASC"
+            else
+              "DESC"
+            end
+            reversed << "#{col} #{new_dir}"
+          end
+          index += 1
+        end
+
+        return "id DESC" if reversed.empty?
+        reversed.join(", ")
+      end
+
+      UNSAFE_CHARS = [";", "'", "\\"", "-" + "-", "/", "\\\\"].freeze
+
+      def validate_order_clause(text)
+        parts = text.split(",")
+        index = 0
+        while index < parts.length
+          part = parts[index].strip
+          tokens = part.split(" ")
+          col = tokens[0]
+          dir = tokens[1]
+          raise ArgumentError, "Invalid order clause: #{text}" if col.nil? || col.empty?
+          validate_identifier(col)
+          raise ArgumentError, "Invalid order direction: #{dir}" if dir && dir.upcase != "ASC" && dir.upcase != "DESC"
+          raise ArgumentError, "Invalid order clause: #{text}" if tokens.length > 2
+          index += 1
+        end
+      end
+
+      def validate_sql_fragment(text)
+        return if text.empty?
+        idx = 0
+        while idx < UNSAFE_CHARS.length
+          raise ArgumentError, "Invalid SQL fragment: #{text}" if text.include?(UNSAFE_CHARS[idx])
+          idx += 1
+        end
+      end
+
+      def validate_identifier(name)
+        raise ArgumentError, "Invalid identifier: #{name}" if name.empty?
+        chars = name.chars
+        first = chars[0]
+        raise ArgumentError, "Invalid identifier: #{name}" unless (first >= "a" && first <= "z") || (first >= "A" && first <= "Z") || first == "_"
+        idx = 1
+        while idx < chars.length
+          c = chars[idx]
+          unless (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c == "_"
+            raise ArgumentError, "Invalid identifier: #{name}"
+          end
+          idx += 1
+        end
       end
 
       def select_sql
@@ -2642,7 +2712,7 @@ export const HOMURA_MODEL = `class Homura
       classify(word.to_sym)
     end
 
-    def self.where(conditions = {})
+    def self.where(conditions = nil)
       Query.new(self).where(conditions)
     end
 
@@ -2818,10 +2888,36 @@ export const HOMURA_MODEL = `class Homura
           end
         end
         if opts[:format]
-          pattern = opts[:format][:with]
           value = @attributes[name]
-          if value.is_a?(String) && pattern && !pattern.match(value)
-            @errors << "#{name} is invalid"
+          if value.is_a?(String)
+            fmt = opts[:format]
+            if fmt[:pattern] == :email
+              # Simple email check without regex (mruby has no Regexp by default)
+              valid = true
+              if value.nil? || value.strip.empty?
+                valid = false
+              else
+                at_pos = value.index("@")
+                dot_pos = value.rindex(".")
+                if at_pos.nil? || dot_pos.nil?
+                  valid = false
+                elsif at_pos <= 0 || dot_pos <= at_pos + 1 || dot_pos >= value.length - 1
+                  valid = false
+                end
+              end
+              @errors << "#{name} is invalid" unless valid
+            elsif fmt[:with]
+              pattern = fmt[:with]
+              valid = true
+              if pattern.respond_to?(:match)
+                valid = !!pattern.match(value)
+              elsif pattern.respond_to?(:call)
+                valid = !!pattern.call(value)
+              end
+              unless valid
+                @errors << "#{name} is invalid"
+              end
+            end
           end
         end
         if opts[:inclusion]
@@ -3074,17 +3170,13 @@ export const HOMURA_MODEL = `class Homura
         @attributes[attr_name]
       end
 
+      # Use a helper method to capture loop variables correctly in closures.
+      # Without this, mruby's while-loop variable \`key\` would be shared
+      # across all closures and always reference the last loop value.
       keys = mapping.keys
       index = 0
       while index < keys.length
-        key = keys[index]
-        define_method("#{key}?") do
-          @attributes[attr_name] == mapping[key] || @attributes[attr_name].to_s == key
-        end
-        define_method("#{key}!") do
-          @attributes[attr_name] = mapping[key]
-          self
-        end
+        _define_enum_predicate_and_bang(attr_name, keys[index], mapping)
         index += 1
       end
 
@@ -3094,6 +3186,17 @@ export const HOMURA_MODEL = `class Homura
       end
       define_singleton_method("#{attr_name}_values") do
         enums[attr_name]
+      end
+    end
+
+    def self._define_enum_predicate_and_bang(attr_name, key, mapping)
+      val = mapping[key]
+      define_method("#{key}?") do
+        @attributes[attr_name] == val || @attributes[attr_name].to_s == key.to_s
+      end
+      define_method("#{key}!") do
+        @attributes[attr_name] = val
+        self
       end
     end
 

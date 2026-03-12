@@ -57,7 +57,7 @@ app.get('/api/stats', async (c) => {
   const pending = await c.env.DB.prepare('SELECT COUNT(*) as c FROM todos WHERE status = 0').first<{ c: number }>();
   const inProgress = await c.env.DB.prepare('SELECT COUNT(*) as c FROM todos WHERE status = 1').first<{ c: number }>();
   const done = await c.env.DB.prepare('SELECT COUNT(*) as c FROM todos WHERE status = 2').first<{ c: number }>();
-  const highPriority = await c.env.DB.prepare('SELECT COUNT(*) as c FROM todos WHERE priority = 1').first<{ c: number }>();
+  const highPriority = await c.env.DB.prepare('SELECT COUNT(*) as c FROM todos WHERE priority = 3').first<{ c: number }>();
   const catCount = await c.env.DB.prepare('SELECT COUNT(*) as c FROM categories').first<{ c: number }>();
 
   return c.json({

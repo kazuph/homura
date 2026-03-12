@@ -267,10 +267,31 @@ class Homura
       end
 
       def reverse_order_clause
-        return "id DESC" if @order_clause.nil? || @order_clause.empty?
-        return @order_clause.gsub(" DESC", " ASC") if @order_clause.include?(" DESC")
-        return @order_clause.gsub(" ASC", " DESC") if @order_clause.include?(" ASC")
-        @order_clause + " DESC"
+        return "id DESC" if @order_clause.nil? || @order_clause.strip.empty?
+
+        segments = @order_clause.split(",")
+        reversed = []
+        index = 0
+        while index < segments.length
+          part = segments[index].strip
+          unless part.empty?
+            tokens = part.split(" ")
+            col = tokens[0]
+            dir = tokens[1]
+            new_dir = if dir && dir.upcase == "ASC"
+              "DESC"
+            elsif dir && dir.upcase == "DESC"
+              "ASC"
+            else
+              "DESC"
+            end
+            reversed << "#{col} #{new_dir}"
+          end
+          index += 1
+        end
+
+        return "id DESC" if reversed.empty?
+        reversed.join(", ")
       end
 
       UNSAFE_CHARS = [";", "'", "\"", "-" + "-", "/", "\\"].freeze
@@ -696,13 +717,28 @@ class Homura
             fmt = opts[:format]
             if fmt[:pattern] == :email
               # Simple email check without regex (mruby has no Regexp by default)
-              valid = value.include?("@") && !value.include?(" ") && value.length >= 3
-              at_pos = value.index("@")
-              valid = false if at_pos.nil? || at_pos == 0 || at_pos == value.length - 1
+              valid = true
+              if value.nil? || value.strip.empty?
+                valid = false
+              else
+                at_pos = value.index("@")
+                dot_pos = value.rindex(".")
+                if at_pos.nil? || dot_pos.nil?
+                  valid = false
+                elsif at_pos <= 0 || dot_pos <= at_pos + 1 || dot_pos >= value.length - 1
+                  valid = false
+                end
+              end
               @errors << "#{name} is invalid" unless valid
             elsif fmt[:with]
               pattern = fmt[:with]
-              if pattern && !pattern.match(value)
+              valid = true
+              if pattern.respond_to?(:match)
+                valid = !!pattern.match(value)
+              elsif pattern.respond_to?(:call)
+                valid = !!pattern.call(value)
+              end
+              unless valid
                 @errors << "#{name} is invalid"
               end
             end

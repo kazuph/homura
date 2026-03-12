@@ -742,51 +742,6 @@ int homura_eval(void) {
 }
 
 /**
- * Load pre-compiled mruby bytecode (irep) from input buffer.
- * JS side writes mrbc-compiled binary to input_buffer, calls this with length.
- * Returns 1 on success, 0 on error. Result in output_buffer as JSON.
- */
-WASM_EXPORT
-int homura_load_irep(int input_len) {
-    output_length = 0;
-    output_buffer[0] = '\0';
-
-    if (mrb == NULL) {
-        snprintf((char*)output_buffer, sizeof(output_buffer),
-                 "{\"error\":\"mruby not initialized\"}");
-        output_length = (int)strnlen((char*)output_buffer, HOMURA_BUFFER_SIZE);
-        return 0;
-    }
-    if (input_len <= 0 || input_len > HOMURA_BUFFER_SIZE) {
-        snprintf((char*)output_buffer, sizeof(output_buffer),
-                 "{\"error\":\"invalid irep length\"}");
-        output_length = (int)strnlen((char*)output_buffer, HOMURA_BUFFER_SIZE);
-        return 0;
-    }
-
-    int ai = mrb_gc_arena_save(mrb);
-    mrb_value result = mrb_load_irep_buf(mrb, (const void*)input_buffer, (size_t)input_len);
-
-    if (mrb->exc) {
-        mrb_value exc = mrb_obj_value(mrb->exc);
-        mrb_value msg = mrb_funcall(mrb, exc, "message", 0);
-        mrb->exc = NULL;
-        snprintf((char*)output_buffer, sizeof(output_buffer),
-                 "{\"error\":\"%s\"}",
-                 mrb_string_p(msg) ? RSTRING_PTR(msg) : "Unknown irep error");
-        output_length = (int)strnlen((char*)output_buffer, HOMURA_BUFFER_SIZE);
-        mrb_gc_arena_restore(mrb, ai);
-        return 0;
-    }
-
-    mrb_gc_protect(mrb, result);
-    value_to_json(mrb, result, (char*)output_buffer, sizeof(output_buffer));
-    output_length = (int)strnlen((char*)output_buffer, HOMURA_BUFFER_SIZE);
-    mrb_gc_arena_restore(mrb, ai);
-    return 1;
-}
-
-/**
  * Handle a MessagePack request
  */
 WASM_EXPORT

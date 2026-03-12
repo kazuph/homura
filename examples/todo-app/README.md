@@ -25,13 +25,27 @@ A practical todo app demonstrating Homura::Model ORM features on Cloudflare Work
 
 ```bash
 cd examples/todo-app
-npm install
+pnpm install
 
 # Apply migrations (local D1)
-npx wrangler d1 migrations apply homura-todo-db --local
+pnpm run db:migrate:local
 
 # Start dev server
-npm run dev
+pnpm run dev
+```
+
+## Testing
+
+From the repo root:
+
+```bash
+pnpm test:e2e:todo-app
+```
+
+From the example directory:
+
+```bash
+pnpm test:e2e
 ```
 
 ## Routes

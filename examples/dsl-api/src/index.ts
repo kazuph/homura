@@ -1297,6 +1297,8 @@ class MRuby {
       return 0;
     });
 
+    jmpBufRegistry.clear();
+
     const currentMemory = this.getMemory();
     const resultPtr = exports.homura_get_result();
     const memoryView = new Uint8Array(currentMemory.buffer);
@@ -1440,6 +1442,7 @@ interface Env {
 let mruby: MRuby | null = null;
 let coreLoaded = false;
 let requestCount = 0;
+let precompiledLoadingEnabled = HAS_PRECOMPILED;
 // Proactively recycle WASM instance every N requests to prevent memory corruption.
 // mruby WASM instances degrade after ~20 requests, producing garbled MessagePack data.
 const MAX_REQUESTS_BEFORE_RECYCLE = 20;
@@ -1510,7 +1513,21 @@ export default {
           requestCount = 0;
         }
         if (!coreLoaded) {
-          console.info('[homura] Loading via eval...');
+          const loadIrepAndCheck = (label: string, bytecode: string, required = true) => {
+            if (!bytecode) {
+              if (required) {
+                throw new Error(`${label} bytecode missing`);
+              }
+              return;
+            }
+            const result = mruby!.loadIrep(bytecode);
+            const error = mruby!.parseEvalFailure(result);
+            if (error) {
+              console.error(`[homura] Failed to load ${label} via irep:`, error);
+              throw new Error(`${label} irep loading failed`);
+            }
+            console.info(`[homura] ${label} loaded via irep.`);
+          };
           const evalAndCheck = (label: string, code: string) => {
             if (!code) return;
             const result = mruby!.eval(code);
@@ -1521,10 +1538,30 @@ export default {
             }
             console.info(`[homura] ${label} loaded via eval.`);
           };
-          evalAndCheck('core', HOMURA_CORE);
-          evalAndCheck('model', HOMURA_MODEL);
-          evalAndCheck('models', USER_MODELS);
-          evalAndCheck('routes', USER_ROUTES);
+          if (precompiledLoadingEnabled) {
+            console.info('[homura] Loading via irep...');
+            try {
+              loadIrepAndCheck('core', HOMURA_CORE_MRB);
+              loadIrepAndCheck('model', HOMURA_MODEL_MRB);
+              loadIrepAndCheck('models', USER_MODELS_MRB, false);
+              for (let i = 0; i < USER_ROUTES_MRB_CHUNKS.length; i++) {
+                loadIrepAndCheck(`routes chunk ${i + 1}/${USER_ROUTES_MRB_CHUNKS.length}`, USER_ROUTES_MRB_CHUNKS[i]);
+              }
+            } catch (irepError) {
+              precompiledLoadingEnabled = false;
+              console.warn('[homura] Irep loading failed, falling back to eval:', irepError);
+              evalAndCheck('core', HOMURA_CORE);
+              evalAndCheck('model', HOMURA_MODEL);
+              evalAndCheck('models', USER_MODELS);
+              evalAndCheck('routes', USER_ROUTES);
+            }
+          } else {
+            console.info('[homura] Loading via eval...');
+            evalAndCheck('core', HOMURA_CORE);
+            evalAndCheck('model', HOMURA_MODEL);
+            evalAndCheck('models', USER_MODELS);
+            evalAndCheck('routes', USER_ROUTES);
+          }
           coreLoaded = true;
         }
       };

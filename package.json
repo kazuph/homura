@@ -2,17 +2,19 @@
   "name": "homura",
   "version": "0.1.0",
   "description": "A Ruby DSL web framework for Cloudflare Workers powered by mruby + WASI",
+  "packageManager": "pnpm@10.18.3",
   "type": "module",
   "scripts": {
     "build:mruby": "cd mruby && make",
-    "example:dev": "cd examples/webapp && npm run dev",
-    "example:deploy": "cd examples/webapp && npm run deploy",
-    "test:e2e:webapp": "BASE_URL=http://127.0.0.1:8787 npx playwright test e2e/webapp.spec.ts --config e2e/playwright.config.ts",
-    "test:e2e:url-shortener": "BASE_URL=http://127.0.0.1:8788 npx playwright test e2e/url-shortener.spec.ts --config e2e/playwright.config.ts",
-    "test:e2e:json-transform": "BASE_URL=http://127.0.0.1:8789 npx playwright test e2e/json-transform.spec.ts --config e2e/playwright.config.ts",
-    "test:e2e:template-engine": "BASE_URL=http://127.0.0.1:8790 npx playwright test e2e/template-engine.spec.ts --config e2e/playwright.config.ts",
-    "test:e2e:time-tracker": "BASE_URL=http://127.0.0.1:8791 npx playwright test e2e/time-tracker.spec.ts --config e2e/playwright.config.ts",
-    "test:e2e:dsl-api": "BASE_URL=http://127.0.0.1:8792 npx playwright test e2e/dsl-api.spec.ts --config e2e/playwright.config.ts"
+    "example:dev": "pnpm --dir examples/webapp run dev",
+    "example:deploy": "pnpm --dir examples/webapp run deploy",
+    "test:e2e:webapp": "BASE_URL=http://127.0.0.1:8787 pnpm exec playwright test e2e/webapp.spec.ts --config e2e/playwright.config.ts",
+    "test:e2e:url-shortener": "BASE_URL=http://127.0.0.1:8788 pnpm exec playwright test e2e/url-shortener.spec.ts --config e2e/playwright.config.ts",
+    "test:e2e:json-transform": "BASE_URL=http://127.0.0.1:8789 pnpm exec playwright test e2e/json-transform.spec.ts --config e2e/playwright.config.ts",
+    "test:e2e:template-engine": "BASE_URL=http://127.0.0.1:8790 pnpm exec playwright test e2e/template-engine.spec.ts --config e2e/playwright.config.ts",
+    "test:e2e:time-tracker": "BASE_URL=http://127.0.0.1:8791 pnpm exec playwright test e2e/time-tracker.spec.ts --config e2e/playwright.config.ts",
+    "test:e2e:dsl-api": "BASE_URL=http://127.0.0.1:8792 pnpm exec playwright test e2e/dsl-api.spec.ts --config e2e/playwright.config.ts",
+    "test:e2e:todo-app": "pnpm --filter homura-todo-app test:e2e"
   },
   "keywords": [
     "ruby",
