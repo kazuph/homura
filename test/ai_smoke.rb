@@ -123,11 +123,7 @@ def fresh_binding
 end
 
 def push_response(hash)
-  js_obj = `({})`
-  hash.each do |k, v|
-    ks = k.to_s
-    `#{js_obj}[#{ks}] = #{v}`
-  end
+  js_obj = Cloudflare::AI.ruby_to_js(hash)
   `globalThis.__test_ai_response_queue__.push(#{js_obj})`
 end
 
@@ -145,6 +141,12 @@ def last_call
   return nil if idx < 0
   raw = `globalThis.__test_ai_calls__[#{idx}]`
   Cloudflare.js_to_ruby(raw)
+end
+
+def last_call_raw
+  idx = call_count - 1
+  return nil if idx < 0
+  `globalThis.__test_ai_calls__[#{idx}]`
 end
 
 $stdout.puts "=== homura Phase 10 — Workers AI smoke ==="
@@ -293,7 +295,141 @@ SmokeTest
   .__await__
 
 # ---------------------------------------------------------------------
-# 3. Fallback flow (simulated at the route layer would do this; this
+# 3. Higher-level helpers
+# ---------------------------------------------------------------------
+$stdout.puts ""
+$stdout.puts "--- Cloudflare::AI convenience helpers ---"
+
+SmokeTest
+  .assert!("chat_text builds system + user messages and extracts text") do
+    binding = fresh_binding
+    ai = Cloudflare::AI::Binding.new(binding)
+    push_response(
+      "choices" => [{ "message" => { "content" => "chat helper ok" } }]
+    )
+    out =
+      ai.chat_text(
+        "Say hello",
+        system: "Reply briefly.",
+        max_tokens: 32
+      ).__await__
+    raw = last_call_raw
+    out == "chat helper ok" &&
+      `#{raw}.inputs.messages.length === 2 && #{raw}.inputs.messages[0].role === 'system' && #{raw}.inputs.messages[1].content === 'Say hello' && #{raw}.inputs.max_tokens === 32 && #{raw}.inputs.chat_template_kwargs.thinking === false`
+  end
+  .__await__
+
+SmokeTest
+  .assert!("extract_text reads top-level messages[].reasoning_content too") do
+    binding = fresh_binding
+    ai = Cloudflare::AI::Binding.new(binding)
+    push_response(
+      "messages" => [
+        {
+          "role" => "assistant",
+          "reasoning_content" => "reasoning fallback text"
+        }
+      ]
+    )
+    ai.chat_text("debug shape").__await__ == "reasoning fallback text"
+  end
+  .__await__
+
+SmokeTest
+  .assert!("transcribe_text sends UploadedFile bytes as byte array") do
+    binding = fresh_binding
+    ai = Cloudflare::AI::Binding.new(binding)
+    audio =
+      Cloudflare::UploadedFile.new(
+        name: "audio",
+        filename: "voice.wav",
+        content_type: "audio/wav",
+        bytes_binstr: "abc"
+      )
+    push_response("text" => "spoken words")
+    out = ai.transcribe_text(audio, language: "ja").__await__
+    raw = last_call_raw
+    out == "spoken words" &&
+      `Array.isArray(#{raw}.inputs.audio) && #{raw}.inputs.audio.length === 3 && #{raw}.inputs.audio[0] === 97 && #{raw}.inputs.language === 'ja'`
+  end
+  .__await__
+
+SmokeTest
+  .assert!("speak returns BinaryBody and forces returnRawResponse") do
+    `globalThis.__test_ai_reset__()`
+    binding =
+      `({
+      run: async function(model, inputs, options) {
+        globalThis.__test_ai_calls__.push({ model: model, inputs: inputs, options: options });
+        return new Response('mock-mp3', { headers: { 'content-type': 'audio/mpeg' } });
+      }
+    })`
+    ai = Cloudflare::AI::Binding.new(binding)
+    out = ai.speak("hello world", speaker: "luna").__await__
+    c = last_call
+    out.is_a?(Cloudflare::BinaryBody) && out.content_type == "audio/mpeg" &&
+      c["model"] == "@cf/deepgram/aura-1" && c["inputs"]["speaker"] == "luna" &&
+      c["options"]["returnRawResponse"] == true
+  end
+  .__await__
+
+SmokeTest
+  .assert!("speak_data_url returns an embeddable data URL") do
+    `globalThis.__test_ai_reset__()`
+    binding =
+      `({
+      run: async function(model, inputs, options) {
+        globalThis.__test_ai_calls__.push({ model: model, inputs: inputs, options: options });
+        return new Response(new Uint8Array([72, 73]), { headers: { 'content-type': 'audio/mpeg' } });
+      }
+    })`
+    ai = Cloudflare::AI::Binding.new(binding)
+    out = ai.speak_data_url("hi", speaker: "luna").__await__
+    out.start_with?("data:audio/mpeg;base64,") && out.end_with?("SEk=")
+  end
+  .__await__
+
+SmokeTest
+  .assert!("build_js_response passes RawResponse through unchanged") do
+    raw =
+      Cloudflare::RawResponse.new(
+        `new Response('audio-body', { headers: { 'content-type': 'audio/mpeg' } })`
+      )
+    js_response = Rack::Handler::Homura.send(:build_js_response, 200, {}, raw)
+    `#{js_response} === #{raw.js_response}` &&
+      `#{js_response}.headers.get('content-type') === 'audio/mpeg'`
+  end
+  .__await__
+
+SmokeTest
+  .assert!("build_js_response passes wrapped RawResponse chunks through too") do
+    raw =
+      Cloudflare::RawResponse.new(
+        `new Response('audio-body', { headers: { 'content-type': 'audio/mpeg' } })`
+      )
+    js_response = Rack::Handler::Homura.send(:build_js_response, 200, {}, [raw])
+    `#{js_response} === #{raw.js_response}` &&
+      `#{js_response}.headers.get('content-type') === 'audio/mpeg'`
+  end
+  .__await__
+
+SmokeTest
+  .assert!(
+    "build_js_response passes plain stream/content_type chunks through"
+  ) do
+    stream =
+      `new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('audio-body')); controller.close(); } })`
+    plain =
+      `({ stream: #{stream}, content_type: 'audio/mpeg', cache_control: 'public, max-age=60' })`
+    js_response =
+      Rack::Handler::Homura.send(:build_js_response, 200, {}, [plain])
+    `#{js_response}.headers.get('content-type') === 'audio/mpeg'` &&
+      `#{js_response}.headers.get('cache-control') === 'public, max-age=60'`
+  end
+  .__await__
+
+# ---------------------------------------------------------------------
+# 4. Fallback flow (simulated at the route layer would do this; this
 #    asserts the building block behaves predictably under failure +
 #    immediately-empty conditions).
 # ---------------------------------------------------------------------
@@ -335,7 +471,7 @@ SmokeTest
   .__await__
 
 # ---------------------------------------------------------------------
-# 4. KV-style history persistence (smoke verifying the JSON round trip
+# 5. KV-style history persistence (smoke verifying the JSON round trip
 #    that the chat route relies on; this is "what would KV store?").
 # ---------------------------------------------------------------------
 $stdout.puts ""

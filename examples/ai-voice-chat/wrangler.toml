@@ -1,0 +1,7 @@
+name = "ai-voice-chat"
+main = "build/worker.entrypoint.mjs"
+compatibility_date = "2026-05-06"
+compatibility_flags = ["nodejs_compat"]
+
+[ai]
+binding = "AI"

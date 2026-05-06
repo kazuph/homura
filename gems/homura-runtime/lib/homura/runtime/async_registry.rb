@@ -193,8 +193,16 @@ HomuraRuntime::AsyncRegistry.register_async_source do
   async_method "Cloudflare::R2Bucket", :head
 
   async_method "Cloudflare::AI", :run
+  async_method "Cloudflare::AI", :speak
+  async_method "Cloudflare::AI", :speak_data_url
   taint_return "Cloudflare::AI", :run_stream, "Cloudflare::AI::Stream"
   async_method "Cloudflare::AI::Binding", :run
+  async_method "Cloudflare::AI::Binding", :chat
+  async_method "Cloudflare::AI::Binding", :chat_text
+  async_method "Cloudflare::AI::Binding", :transcribe
+  async_method "Cloudflare::AI::Binding", :transcribe_text
+  async_method "Cloudflare::AI::Binding", :speak
+  async_method "Cloudflare::AI::Binding", :speak_data_url
   taint_return "Cloudflare::AI::Binding", :run_stream, "Cloudflare::AI::Stream"
 
   async_method "Cloudflare::Cache", :match
