@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.7 (2026-05-06)
+
+- Add Ruby-shaped Workers AI helpers for the staged voice examples:
+  `ai.chat`, `ai.chat_text`, `ai.transcribe`, `ai.transcribe_text`,
+  `ai.speak`, and `ai.speak_data_url`.
+- `ai.speak` returns a `Cloudflare::BinaryBody`, so a Sinatra route can
+  stream Aura audio directly back to the browser without exposing JS
+  response plumbing in user code.
+- Register the new AI helpers with auto-await so example/source Ruby stays
+  sync-shaped.
+
 ## 0.3.6 (2026-05-03)
 
 - Release the no-await-surface examples/docs baseline: public Rack,

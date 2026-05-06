@@ -303,12 +303,14 @@ module Rack
           # stub.fetch) wraps it in Cloudflare::RawResponse. We pass
           # the JS object through unchanged — any reconstruction
           # would strip runtime-only properties the client depends on.
+          first_body = (body.first if body.respond_to?(:first))
+          first_body_ruby =
+            !`(#{first_body} == null || #{first_body}.$$class == null)`
           raw = nil
           if body.is_a?(::Cloudflare::RawResponse)
             raw = body
-          elsif body.respond_to?(:first) &&
-                body.first.is_a?(::Cloudflare::RawResponse)
-            raw = body.first
+          elsif first_body_ruby && first_body.is_a?(::Cloudflare::RawResponse)
+            raw = first_body
           end
           if raw
             js_resp = raw.js_response
@@ -318,11 +320,8 @@ module Rack
           # Binary body fast-path: pass the JS ReadableStream directly
           # to Response without touching Opal's String encoding.
           if body.is_a?(::Cloudflare::BinaryBody) ||
-               (
-                 body.respond_to?(:first) &&
-                   body.first.is_a?(::Cloudflare::BinaryBody)
-               )
-            bin = body.is_a?(::Cloudflare::BinaryBody) ? body : body.first
+               (first_body_ruby && first_body.is_a?(::Cloudflare::BinaryBody))
+            bin = body.is_a?(::Cloudflare::BinaryBody) ? body : first_body
             js_stream = bin.stream
             ct = bin.content_type
             cc = bin.cache_control
@@ -341,11 +340,11 @@ module Rack
 
           if body.is_a?(::Cloudflare::EmbeddedBinaryBody) ||
                (
-                 body.respond_to?(:first) &&
-                   body.first.is_a?(::Cloudflare::EmbeddedBinaryBody)
+                 first_body_ruby &&
+                   first_body.is_a?(::Cloudflare::EmbeddedBinaryBody)
                )
             bin =
-              body.is_a?(::Cloudflare::EmbeddedBinaryBody) ? body : body.first
+              body.is_a?(::Cloudflare::EmbeddedBinaryBody) ? body : first_body
             js_stream = bin.stream
             ct = bin.content_type
             cc = bin.cache_control
@@ -366,12 +365,16 @@ module Rack
           # a JS ReadableStream<Uint8Array> emitting SSE-formatted bytes
           # ("data: {json}\n\n"). Pass it straight through so the client
           # receives the chunks as they arrive.
+          first_body = (body.first if body.respond_to?(:first))
+          first_body_ruby =
+            !`(#{first_body} == null || #{first_body}.$$class == null)`
+
           stream_obj = nil
           if body.respond_to?(:sse_stream?) && body.sse_stream?
             stream_obj = body
-          elsif body.respond_to?(:first) &&
-                body.first.respond_to?(:sse_stream?) && body.first.sse_stream?
-            stream_obj = body.first
+          elsif first_body_ruby && first_body.respond_to?(:sse_stream?) &&
+                first_body.sse_stream?
+            stream_obj = first_body
           end
           if stream_obj
             js_stream = stream_obj.js_stream
@@ -406,11 +409,66 @@ module Rack
             )
           end
 
+          raw_response = nil
+          if body.respond_to?(:raw_response?) && body.raw_response?
+            raw_response = body
+          elsif first_body_ruby && first_body.respond_to?(:raw_response?) &&
+                first_body.raw_response?
+            raw_response = first_body
+          end
+          return raw_response.js_response if raw_response
+
           chunks = []
           if body.respond_to?(:each)
             body.each { |chunk| chunks << chunk }
           else
             chunks << body
+          end
+
+          raw_chunk =
+            chunks.find do |chunk|
+              chunk_ruby = !`(#{chunk} == null || #{chunk}.$$class == null)`
+              chunk_ruby && chunk.respond_to?(:raw_response?) &&
+                chunk.raw_response?
+            end
+          return raw_chunk.js_response if raw_chunk
+
+          binary_chunk =
+            chunks.find do |chunk|
+              chunk_ruby = !`(#{chunk} == null || #{chunk}.$$class == null)`
+              (
+                chunk_ruby && chunk.respond_to?(:stream) &&
+                  chunk.respond_to?(:content_type)
+              ) ||
+                `#{chunk} != null && #{chunk}.stream != null && #{chunk}.content_type != null`
+            end
+          if binary_chunk
+            binary_chunk_ruby =
+              !`(#{binary_chunk} == null || #{binary_chunk}.$$class == null)`
+            stream =
+              if binary_chunk_ruby && binary_chunk.respond_to?(:stream)
+                binary_chunk.stream
+              else
+                `#{binary_chunk}.stream`
+              end
+            content_type =
+              if binary_chunk_ruby && binary_chunk.respond_to?(:content_type)
+                binary_chunk.content_type
+              else
+                `#{binary_chunk}.content_type`
+              end
+            cache_control =
+              if binary_chunk_ruby && binary_chunk.respond_to?(:cache_control)
+                binary_chunk.cache_control
+              else
+                `#{binary_chunk}.cache_control`
+              end
+            body_headers = {}
+            body_headers["content-type"] = content_type if content_type
+            body_headers["cache-control"] = cache_control if cache_control
+            return(
+              `new Response(#{stream}, { status: #{status.to_i}, headers: #{Cloudflare.headers_to_js(body_headers)} })`
+            )
           end
 
           # Build JS-side headers. Set-Cookie is the one HTTP response

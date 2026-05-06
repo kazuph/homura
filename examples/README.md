@@ -1,6 +1,6 @@
 # Examples
 
-Twelve fully-working applications built on the published [homura](../) gems.
+Fifteen fully-working applications built on the published [homura](../) gems.
 Each example is a standalone project: its `Gemfile` pins released gems
 from RubyGems with no `path:` references back to the monorepo, so any
 of them can be copied out of this directory and shipped on its own.
@@ -19,6 +19,9 @@ idiom works the way the upstream docs say it does.
 | [`classic-top-sinatra/`](classic-top-sinatra/) | Sinatra (single file, JSON) | <https://classic-top-sinatra.kazu-san.workers.dev/> | Same shape as `sinatra/` but emits JSON via `content_type :json`. Dogfoods the classic top-level DSL across the build pipeline. |
 | [`sinatra-with-db/`](sinatra-with-db/) | Sinatra + D1 + Sequel | <https://sinatra-with-db.kazu-san.workers.dev/> | Smallest D1-backed Sinatra: `Sequel.connect(adapter: :d1, d1: d1)`, one route, one migration. |
 | [`sinatra-with-email/`](sinatra-with-email/) | Sinatra + Cloudflare Email | <https://sinatra-with-email.kazu-san.workers.dev/> | POST `/send` over the `SEND_EMAIL` Cloudflare Email binding with ordinary Ruby method calls in source. |
+| [`ai-chat/`](ai-chat/) | Sinatra + Workers AI (Kimi K2.6) | <https://ai-chat.kazu-san.workers.dev/> | Smallest AI example: one form post, one `ai.chat_text` call, one text reply. |
+| [`ai-transcribe-chat/`](ai-transcribe-chat/) | Sinatra + Workers AI (Whisper + Kimi K2.6) | <https://ai-transcribe-chat.kazu-san.workers.dev/> | Upload audio, transcribe it with Whisper, then send the transcript to Kimi — still in a single-file Sinatra app. |
+| [`ai-voice-chat/`](ai-voice-chat/) | Sinatra + Workers AI (Whisper + Kimi K2.6 + Aura) | <https://ai-voice-chat.kazu-san.workers.dev/> | Full voice round-trip: audio upload, transcript, Kimi reply, and inline MP3 playback from `ai.speak_data_url`. |
 | [`todo-simple/`](todo-simple/) | Sinatra (in-memory) | <https://todo-simple.kazu-san.workers.dev/> | **The smallest stateful example.** One `app.rb`, no `views/`, no D1 — heredoc HTML right next to the routes. Use it when you want to see how little homura needs once you have state. |
 | [`todo/`](todo/) | Sinatra + D1 (no ORM) | <https://todo.kazu-san.workers.dev/> | Smallest D1 CRUD. `db.execute` / `db.execute_insert` directly — no Sequel. |
 | [`todo-orm/`](todo-orm/) | Sinatra + D1 + Sequel | <https://todo-orm.kazu-san.workers.dev/> | Same TODO domain through `sequel-d1`. Datasets, `.first`, `.update(... Sequel.lit ...)`, migration DSL → wrangler-ready SQL. |
