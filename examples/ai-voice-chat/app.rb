@@ -209,9 +209,9 @@ def page(
           --panel-edge: rgba(255, 255, 255, .08);
           --text: #eef6ff;
           --muted: #aebdcb;
-          --accent: #51d0ff;
-          --accent-strong: #0bb7ff;
-          --accent-soft: rgba(81, 208, 255, .16);
+          --accent: #8c6bff;
+          --accent-strong: #6550ff;
+          --accent-soft: rgba(124, 92, 255, .16);
           --focus: #ffe27a;
         }
         * { box-sizing: border-box; }
@@ -222,7 +222,7 @@ def page(
           line-height: 1.5;
           color: var(--text);
           background:
-            radial-gradient(circle at top, rgba(81, 208, 255, .18), transparent 30rem),
+            radial-gradient(circle at top, rgba(255, 255, 255, .08), transparent 28rem),
             radial-gradient(circle at bottom right, rgba(124, 92, 255, .16), transparent 30rem),
             linear-gradient(180deg, #09111d, var(--bg));
         }
@@ -276,20 +276,19 @@ def page(
           display: grid;
           place-items: center;
           gap: .7rem;
-          width: min(100%, 18.5rem);
-          aspect-ratio: 1;
+          width: min(100%, 21rem);
+          min-height: 15rem;
+          padding: 2rem 1.5rem;
           margin: 1.45rem auto .8rem;
           border: 0;
-          border-radius: 50%;
+          border-radius: 2rem;
           cursor: pointer;
           color: inherit;
-          background:
-            radial-gradient(circle at 35% 30%, #e9fbff, transparent 24%),
-            radial-gradient(circle at center, #47d7ff, var(--accent-strong) 72%);
+          background: linear-gradient(180deg, rgba(255, 255, 255, .1), rgba(124, 92, 255, .26));
           box-shadow:
             0 0 0 1px rgba(255, 255, 255, .12),
-            0 28px 50px rgba(11, 183, 255, .28),
-            0 0 0 18px var(--accent-soft);
+            0 28px 50px rgba(82, 64, 190, .26),
+            inset 0 1px 0 rgba(255, 255, 255, .08);
           transition: transform .18s ease, box-shadow .18s ease, filter .18s ease;
         }
         .record-button:hover { transform: translateY(-2px) scale(1.01); }
@@ -297,8 +296,8 @@ def page(
           animation: pulse 1.4s ease-in-out infinite;
           box-shadow:
             0 0 0 1px rgba(255, 255, 255, .12),
-            0 0 0 20px rgba(11, 183, 255, .16),
-            0 0 0 40px rgba(11, 183, 255, .08);
+            0 0 0 10px rgba(124, 92, 255, .16),
+            0 0 0 20px rgba(124, 92, 255, .08);
         }
         .record-button[disabled] {
           cursor: progress;
