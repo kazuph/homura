@@ -17,13 +17,12 @@
 - Stimulus is limited to browser-only behavior: focusing the text input
   and confirming destructive submits.
 
-## Why this example uses local homura gems
+## Published gem boundary
 
-This example dogfoods the repository's current `opal-homura` and
-`homura-runtime` source via `path:` gems. That is intentional: upstream
-`phlex` 2.4 and `literal` 1.9 depend on Zeitwerk, and the compatibility
-support for bundling those gems lives in this repository until the next
-published gem release.
+This example intentionally resolves the homura stack from published gems:
+`opal-homura`, `homura-runtime`, `sinatra-homura`, and `sequel-d1`.
+That keeps the sample reproducible outside this repository while still using
+upstream `phlex` 2.4 and `literal` 1.9 through Rubygems.
 
 There are no app-local `phlex` or `literal` shims here. The component code
 does `require "phlex"` and `require "literal"` and lets homura's build

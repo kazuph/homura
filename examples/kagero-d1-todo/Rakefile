@@ -24,9 +24,11 @@ def run!(*argv)
 end
 
 task(:runtime) do
+  gem_spec = Gem.loaded_specs.fetch("sinatra-kagero")
+
   FileUtils.mkdir_p("public/assets")
   FileUtils.cp(
-    "../../gems/sinatra-kagero/runtime/kagero.js",
+    File.join(gem_spec.full_gem_path, "runtime/kagero.js"),
     "public/assets/kagero.js"
   )
 end
