@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.32 (2026-06-25)
+
+- Only include `Literal::Properties::DocString` when it is already loaded,
+  avoiding a nonessential Literal documentation autoload under Opal.
+
 ## 0.3.31 (2026-06-25)
 
 - Extend component classes with `Literal::Types` when they extend

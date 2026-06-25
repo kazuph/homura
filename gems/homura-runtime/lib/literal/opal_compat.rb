@@ -175,7 +175,7 @@ module Literal::Properties
   def self.extended(base)
     super
     base.extend(Literal::Types)
-    base.include(DocString)
+    base.include(DocString) if const_defined?(:DocString, false)
     base.include(base.__send__(:__literal_extension__))
   end
 
