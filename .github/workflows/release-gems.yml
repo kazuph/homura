@@ -7,6 +7,7 @@ on:
       - 'homura-runtime-v*'
       - 'sinatra-homura-v*'
       - 'sinatra-inertia-v*'
+      - 'sinatra-kagero-v*'
       - 'sequel-d1-v*'
   workflow_dispatch:
     inputs:
@@ -75,6 +76,13 @@ jobs:
               workdir="gems/sinatra-inertia"
               gemspec="sinatra-inertia.gemspec"
               expected_version="$(ruby -e 'load File.expand_path("gems/sinatra-inertia/lib/sinatra/inertia/version.rb", Dir.pwd); print Sinatra::Inertia::VERSION')"
+              ;;
+            sinatra-kagero-v*)
+              gem_name="sinatra-kagero"
+              version="${ref_name#sinatra-kagero-v}"
+              workdir="gems/sinatra-kagero"
+              gemspec="sinatra-kagero.gemspec"
+              expected_version="$(ruby -e 'load File.expand_path("gems/sinatra-kagero/lib/sinatra/kagero/version.rb", Dir.pwd); print Sinatra::Kagero::VERSION')"
               ;;
             sequel-d1-v*)
               gem_name="sequel-d1"
