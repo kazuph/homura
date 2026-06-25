@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.16 (2026-06-25)
+
+- Shadow Phlex compiler files with runtime no-op stubs for Opal builds. Workers
+  need Phlex rendering, not Phlex's Ruby source compiler, and the compiler path
+  pulls in native Prism pieces that cannot run in Opal.
+- Remove the transient `sexp_processor` runtime dependency added in 0.3.15.
+
 ## 0.3.15 (2026-06-25)
 
 - Add `sexp_processor` to the runtime build dependencies and standalone Opal

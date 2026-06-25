@@ -1,10 +1,9 @@
 PATH
   remote: gems/homura-runtime
   specs:
-    homura-runtime (0.3.15)
+    homura-runtime (0.3.16)
       opal-homura (= 1.8.3.rc1.5)
       parser (~> 3.3)
-      sexp_processor (~> 4.17)
 
 PATH
   remote: gems/sequel-d1
@@ -79,7 +78,6 @@ GEM
       zeitwerk
     sequel (5.103.0)
       bigdecimal
-    sexp_processor (4.17.5)
     sinatra (4.2.1)
       logger (>= 1.6.0)
       mustermann (~> 3.0)

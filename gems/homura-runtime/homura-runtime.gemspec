@@ -56,8 +56,4 @@ Gem::Specification.new do |spec|
 
   # parser is required by the build pipeline (auto-await analyzer).
   spec.add_runtime_dependency("parser", "~> 3.3")
-
-  # Prism's RubyParser translation path is pulled in by Phlex's compiler
-  # autoloads during Opal builds.
-  spec.add_runtime_dependency("sexp_processor", "~> 4.17")
 end
