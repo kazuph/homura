@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.21 (2026-06-25)
+
+- Preload Phlex's FIFO dependency before Phlex root setup and explicitly load
+  the SGML/HTML/SVG files in the Opal compatibility layer. This replaces the
+  Zeitwerk autoload work that cannot run against a filesystem inside Workers.
+
 ## 0.3.20 (2026-06-25)
 
 - Define the Opal `ERB::Escape` shim under `class ERB`, matching Opal and

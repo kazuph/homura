@@ -13,6 +13,9 @@ module HomuraRuntime
       "phlex" => "phlex/opal_compat",
       "literal" => "literal/opal_compat"
     }.freeze
+    OPAL_ENTRY_PRELOAD_REQUIRES = {
+      "phlex" => %w[monitor json phlex/fifo]
+    }.freeze
 
     class << self
       def loaded_spec(name, loaded_specs: Gem.loaded_specs)
@@ -262,6 +265,10 @@ module HomuraRuntime
           lib = Pathname(spec.full_gem_path).join("lib")
           root_file = lib.join("#{spec.name}.rb")
           next unless root_file.file?
+
+          OPAL_ENTRY_PRELOAD_REQUIRES.fetch(spec.name, []).each do |require_path|
+            lines << "require #{require_path.inspect}"
+          end
 
           lines << "Zeitwerk.__homura_next_gem_root = #{root_file.to_s.inspect}"
           lines << "require #{("#{spec.name}.rb").inspect}"

@@ -274,6 +274,10 @@ ok = assert("writes Opal gem prelude for supported Zeitwerk gems") do
       raise "missing phlex compat require: #{body}"
     end
 
+    unless body.include?("require \"phlex/fifo\"")
+      raise "missing phlex preload require: #{body}"
+    end
+
     expected = "require_tree #{File.join(phlex_root, "lib").inspect}, autoload: true"
     raise "missing #{expected}: #{body}" unless body.include?(expected)
   end

@@ -3,6 +3,23 @@
 require "corelib/pattern_matching"
 require "zeitwerk/opal_compat"
 require "phlex" unless defined?(Phlex)
+require "phlex/error"
+require "phlex/errors/argument_error"
+require "phlex/errors/double_render_error"
+require "phlex/errors/name_error"
+require "phlex/errors/runtime_error"
+require "phlex/helpers"
+require "phlex/sgml/safe_object"
+require "phlex/sgml/safe_value"
+require "phlex/sgml/state"
+require "phlex/sgml/attributes"
+require "phlex/sgml/elements"
+require "phlex/sgml"
+require "phlex/html/void_elements"
+require "phlex/html/standard_elements"
+require "phlex/html"
+require "phlex/svg/standard_elements"
+require "phlex/svg"
 
 Phlex::SGML
 Phlex::SGML::State
