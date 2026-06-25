@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.12 (2026-06-25)
+
+- Require Phlex/Literal root files with the explicit `.rb` path in the generated
+  Opal gem prelude. This avoids Opal choosing the sibling `lib/phlex/` or
+  `lib/literal/` directory before the root file.
+
 ## 0.3.11 (2026-06-25)
 
 - Package the minimal Opal `monitor` shim required by Zeitwerk. This keeps

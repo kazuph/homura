@@ -262,9 +262,8 @@ module HomuraRuntime
           root_file = lib.join("#{spec.name}.rb")
           next unless root_file.file?
 
-          root_require = root_file.to_s.delete_suffix(".rb")
           lines << "Zeitwerk.__homura_next_gem_root = #{root_file.to_s.inspect}"
-          lines << "require #{root_require.inspect}"
+          lines << "require #{root_file.to_s.inspect}"
           lines << "`Opal.loaded([#{spec.name.inspect}])`"
           lines << "require #{compat.inspect}"
         end
