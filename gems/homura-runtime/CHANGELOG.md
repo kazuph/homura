@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.23 (2026-06-25)
+
+- Load Phlex SGML before SGML extension modules and bootstrap the HTML/SVG
+  class namespaces before loading their element modules.
+
 ## 0.3.22 (2026-06-25)
 
 - Define the Phlex namespace before preloading Phlex FIFO. The FIFO file uses

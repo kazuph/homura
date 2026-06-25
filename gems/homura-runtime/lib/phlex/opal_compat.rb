@@ -9,12 +9,23 @@ require "phlex/errors/double_render_error"
 require "phlex/errors/name_error"
 require "phlex/errors/runtime_error"
 require "phlex/helpers"
+require "phlex/sgml"
 require "phlex/sgml/safe_object"
 require "phlex/sgml/safe_value"
 require "phlex/sgml/state"
 require "phlex/sgml/attributes"
 require "phlex/sgml/elements"
-require "phlex/sgml"
+
+unless defined?(Phlex::HTML)
+  class Phlex::HTML < Phlex::SGML
+  end
+end
+
+unless defined?(Phlex::SVG)
+  class Phlex::SVG < Phlex::SGML
+  end
+end
+
 require "phlex/html/void_elements"
 require "phlex/html/standard_elements"
 require "phlex/html"
