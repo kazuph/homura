@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.17 (2026-06-25)
+
+- Add Ruby LSP addon no-op stubs for published Phlex builds. The Workers
+  runtime does not use Ruby LSP, but Phlex's library tree can reference those
+  files during standalone Opal builds from Rubygems.
+
 ## 0.3.16 (2026-06-25)
 
 - Shadow Phlex compiler files with runtime no-op stubs for Opal builds. Workers
