@@ -131,6 +131,9 @@ class Literal::Types::JSONDataType
 end
 
 require "literal/types"
+require "literal/property"
+require "literal/properties/schema"
+require "literal/properties"
 
 module Literal
   class OpalBuffer
@@ -172,12 +175,7 @@ module Literal
 end
 
 module Literal::Properties
-  def self.extended(base)
-    super
-    base.extend(Literal::Types)
-    base.include(DocString) if const_defined?(:DocString, false)
-    base.include(base.__send__(:__literal_extension__))
-  end
+  include Literal::Types
 
   private def __define_literal_methods__(new_property)
     extension = __literal_extension__

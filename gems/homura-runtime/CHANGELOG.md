@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.34 (2026-06-25)
+
+- Explicitly load Literal property support before reopening
+  `Literal::Properties`, so Opal builds keep the upstream `prop`,
+  `literal_properties`, and `__literal_extension__` methods.
+
+## 0.3.33 (2026-06-25)
+
+- Re-include `Literal::Types` into `Literal::Properties` after the Opal
+  compatibility layer has loaded type helpers, without overriding Literal's
+  own `extended` hook.
+
 ## 0.3.32 (2026-06-25)
 
 - Only include `Literal::Properties::DocString` when it is already loaded,
