@@ -266,6 +266,7 @@ module HomuraRuntime
           root_file = lib.join("#{spec.name}.rb")
           next unless root_file.file?
 
+          lines << "module Phlex; end unless defined?(Phlex)" if spec.name == "phlex"
           OPAL_ENTRY_PRELOAD_REQUIRES.fetch(spec.name, []).each do |require_path|
             lines << "require #{require_path.inspect}"
           end

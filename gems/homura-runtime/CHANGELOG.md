@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.22 (2026-06-25)
+
+- Define the Phlex namespace before preloading Phlex FIFO. The FIFO file uses
+  `class Phlex::FIFO`, so the namespace must exist before the root file runs.
+
 ## 0.3.21 (2026-06-25)
 
 - Preload Phlex's FIFO dependency before Phlex root setup and explicitly load
