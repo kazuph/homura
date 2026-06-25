@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.14 (2026-06-25)
+
+- Load Phlex/Literal root files as logical requires with explicit `.rb`
+  extensions in the generated Opal gem prelude. This avoids both directory
+  collisions and accidental eager loading of Phlex compiler internals.
+
 ## 0.3.13 (2026-06-25)
 
 - Load Phlex/Literal root code through Opal `require_tree` in the generated
