@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.10 (2026-06-25)
+
+- Package the Phlex, Literal, and Zeitwerk Opal compatibility files in
+  `homura-runtime` itself. Published examples can now resolve those compat
+  requires from the runtime gem without depending on an unpublished
+  `opal-homura` stdlib change.
+
 ## 0.3.9 (2026-06-25)
 
 - Add the Homura Opal gem prelude for published Phlex/Literal apps. The build
