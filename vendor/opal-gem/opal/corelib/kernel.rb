@@ -107,8 +107,8 @@ module ::Kernel
     }
   end
 
-  def caller_locations(*args)
-    caller(*args).map do |loc|
+  def caller_locations(start = 1, length = nil)
+    caller(start + 1, length).map do |loc|
       ::Thread::Backtrace::Location.new(loc)
     end
   end

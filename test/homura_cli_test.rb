@@ -223,7 +223,7 @@ Dir.mktmpdir do |dir|
       raise entrypoint
     end
 
-    raise entrypoint unless entrypoint.include?("import \"./bundle.mjs\";")
+    raise entrypoint unless entrypoint.include?("import(\"./bundle.mjs\")")
     unless entrypoint.include?("from \"./cf-runtime/worker_module.mjs\";")
       raise entrypoint
     end

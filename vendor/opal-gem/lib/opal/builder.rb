@@ -139,6 +139,17 @@ module Opal
     end
 
     def process_require_threadsafely(rel_path, autoloads, options)
+      defer_requires = false
+
+      if rel_path.is_a?(Array)
+        rel_path, tree_autoload = rel_path
+        if tree_autoload
+          rel_path = expand_path(rel_path)
+          autoloads = autoloads + [rel_path]
+          defer_requires = true
+        end
+      end
+
       return if prerequired.include?(rel_path)
 
       autoload = autoloads.include? rel_path
@@ -151,12 +162,9 @@ module Opal
       abs_path = expand_path(rel_path)
       rel_path = expand_ext(rel_path)
       asset = processor_for(source, rel_path, abs_path, autoload, options.merge(requirable: true))
-      process_requires(
-        rel_path,
-        asset.requires + tree_requires(asset, abs_path),
-        asset.autoloads,
-        options
-      )
+      requires = defer_requires ? [] : asset.requires + tree_requires(asset, abs_path)
+
+      process_requires(rel_path, requires, asset.autoloads, options)
       asset
     end
 
@@ -221,6 +229,7 @@ module Opal
       abs_base_paths = path_reader.paths.map { |p| File.expand_path(p) }
 
       asset.required_trees.flat_map do |tree|
+        tree, autoload = tree
         abs_tree_path = dirname.join(tree).expand_path.to_s
         abs_base_path = abs_base_paths.find { |p| abs_tree_path.start_with?(p) }
 
@@ -228,7 +237,10 @@ module Opal
           abs_base_path = Pathname(abs_base_path)
           entries_glob  = Pathname(abs_tree_path).join('**', "*{.js,}.{#{extensions.join ','}}")
 
-          Pathname.glob(entries_glob).map { |file| file.relative_path_from(abs_base_path).to_s }
+          Pathname.glob(entries_glob).map do |file|
+            entry = file.relative_path_from(abs_base_path).to_s
+            autoload ? [entry, true] : entry
+          end
         else
           [] # the tree is not part of any known base path
         end

@@ -107,6 +107,12 @@ module Opal
     # @return [String]
     compiler_option :file, default: '(file)'
 
+    # The normalized module name used in Opal.modules. When omitted, the
+    # compiler file is used for backwards compatibility.
+    #
+    # @return [String, nil]
+    compiler_option :module_name, default: nil
+
     # @!method method_missing?
     #
     # adds method stubs for all used methods in file

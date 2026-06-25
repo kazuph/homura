@@ -177,8 +177,8 @@ class ::File < ::IO
           #{files}.push(key)
         }
       }
-      path = path.gsub(/(^.#{SEPARATOR}+|#{SEPARATOR}+$)/)
-      file = files.find { |f| f =~ /^#{path}/ }
+      path = path.gsub(/#{SEPARATOR}+$/, '')
+      file = files.find { |f| f.start_with?(path) }
       file
     end
 

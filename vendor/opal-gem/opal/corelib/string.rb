@@ -1920,6 +1920,10 @@ class ::String < `String`
   alias to_str to_s
   alias to_sym intern
 
+  def name
+    self
+  end
+
   ::Opal.pristine self, :initialize
 end
 

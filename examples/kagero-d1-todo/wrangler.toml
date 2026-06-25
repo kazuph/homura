@@ -1,0 +1,10 @@
+name = "kagero-d1-todo"
+main = "build/worker.entrypoint.mjs"
+compatibility_date = "2026-04-27"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "kagero-d1-todo"
+database_id = "71aa9a53-f787-44db-8e88-0861c4657071"
+migrations_dir = "db/migrate"

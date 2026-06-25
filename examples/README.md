@@ -1,6 +1,6 @@
 # Examples
 
-Fifteen fully-working applications built on the published [homura](../) gems.
+Seventeen fully-working applications built on the published [homura](../) gems.
 Each example is a standalone project: its `Gemfile` pins released gems
 from RubyGems with no `path:` references back to the monorepo, so any
 of them can be copied out of this directory and shipped on its own.
@@ -22,9 +22,11 @@ idiom works the way the upstream docs say it does.
 | [`ai-chat/`](ai-chat/) | Sinatra + Workers AI (Kimi K2.6) | <https://ai-chat.kazu-san.workers.dev/> | Smallest AI example: one form post, one `ai.chat_text` call, one text reply. |
 | [`ai-transcribe-chat/`](ai-transcribe-chat/) | Sinatra + Workers AI (Whisper + Kimi K2.6) | <https://ai-transcribe-chat.kazu-san.workers.dev/> | Browser mic button → Whisper transcript → Kimi reply, still in a single-file Sinatra app. |
 | [`ai-voice-chat/`](ai-voice-chat/) | Sinatra + Workers AI (Whisper + Kimi K2.6 + Aura) | <https://ai-voice-chat.kazu-san.workers.dev/> *(token required)* | Browser mic button → transcript → Kimi reply → romaji rewrite for Japanese TTS → inline MP3 playback from `ai.speak_data_url`. |
+| [`agent-workspace/`](agent-workspace/) | Sinatra + Durable Objects + R2 | — | Shell-like workspace commands (`ls`, `cat`, `write`, `append`, `rm`) backed by one Durable Object per workspace, with large file bodies spilled into R2. Intended as the Ruby base for a later AI agent example. |
 | [`todo-simple/`](todo-simple/) | Sinatra (in-memory) | <https://todo-simple.kazu-san.workers.dev/> | **The smallest stateful example.** One `app.rb`, no `views/`, no D1 — heredoc HTML right next to the routes. Use it when you want to see how little homura needs once you have state. |
 | [`todo/`](todo/) | Sinatra + D1 (no ORM) | <https://todo.kazu-san.workers.dev/> | Smallest D1 CRUD. `db.execute` / `db.execute_insert` directly — no Sequel. |
 | [`todo-orm/`](todo-orm/) | Sinatra + D1 + Sequel | <https://todo-orm.kazu-san.workers.dev/> | Same TODO domain through `sequel-d1`. Datasets, `.first`, `.update(... Sequel.lit ...)`, migration DSL → wrangler-ready SQL. |
+| [`phlex-d1-todo/`](phlex-d1-todo/) | Sinatra + D1 + Phlex-shaped Ruby components | <https://phlex-d1-todo.kazu-san.workers.dev/> | Ruby component classes render the whole UI, Literal-shaped props validate component inputs, and D1 persists TODOs. Stimulus only handles browser-only behavior. |
 | [`auth-otp/`](auth-otp/) | Sinatra + D1 + mailpit + Playwright | <https://auth-otp.kazu-san.workers.dev/login> | Email OTP login backed by a [mailpit](https://mailpit.axllent.org/) sink in development. HMAC-signed session cookie. `rake e2e` (Net::HTTP) and `rake e2e:headed` (real Chromium) for end-to-end verification. |
 | [`blog/`](blog/) | Sinatra + D1 (no ORM) | <https://blog.kazu-san.workers.dev/> | Index / detail / new / proper 404 / delete. Shows that `status 404; erb :posts_not_found` returns 404 — not 200 — under the async route pipeline. |
 | [`inertia-todo/`](inertia-todo/) | Sinatra + Inertia.js + Vue 3 | <https://inertia-todo.kazu-san.workers.dev/> | Server-rendered Inertia page object, `X-Inertia` content negotiation, JSON props. Client JS lives in `public/assets/inertia-app.js`. |

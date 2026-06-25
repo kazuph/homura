@@ -1,0 +1,12 @@
+name = "phlex-d1-todo"
+main = "build/worker.entrypoint.mjs"
+compatibility_date = "2026-04-27"
+compatibility_flags = ["nodejs_compat"]
+
+
+# Replace database_id after `wrangler d1 create phlex-d1-todo`.
+[[d1_databases]]
+binding = "DB"
+database_name = "phlex-d1-todo"
+database_id = "13777783-3052-4e00-98ad-f52d54dd67ed"
+migrations_dir = "db/migrate"

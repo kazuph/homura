@@ -308,7 +308,16 @@ module Opal
         first_arg, *rest = *arglist.children
         if first_arg.type == :str
           relative_path = first_arg.children[0]
-          compiler.required_trees << relative_path
+          autoload = rest.any? do |arg|
+            arg.type == :hash &&
+              arg.children.any? do |pair|
+                key, value = pair.children
+                key.type == :sym &&
+                  key.children[0] == :autoload &&
+                  value.type == :true
+              end
+          end
+          compiler.required_trees << [relative_path, autoload]
 
           dir = File.dirname(compiler.file)
           full_path = Pathname(dir).join(relative_path).cleanpath.to_s

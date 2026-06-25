@@ -1,0 +1,17 @@
+name = "agent-workspace"
+main = "worker.entrypoint.mjs"
+compatibility_date = "2026-05-06"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "WORKSPACE"
+class_name = "HomuraCounterDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["HomuraCounterDO"]
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "agent-workspace"
+preview_bucket_name = "agent-workspace-preview"

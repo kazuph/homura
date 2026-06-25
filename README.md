@@ -235,6 +235,7 @@ fixtures behind the latest gem releases.
 | [`todo-simple`](examples/todo-simple/) | <https://todo-simple.kazu-san.workers.dev/> | **The smallest stateful example.** One `app.rb`, no `views/`, no D1 — HTML written as Ruby heredocs. The thing to copy when "how little does homura need" is the question. |
 | [`todo`](examples/todo/) | <https://todo.kazu-san.workers.dev/> | D1-backed CRUD without an ORM — `db.execute` / `db.execute_insert` directly. |
 | [`todo-orm`](examples/todo-orm/) | <https://todo-orm.kazu-san.workers.dev/> | The same TODO app, this time through `sequel-d1`: migrations, dataset chains, `.first` / `.update`. |
+| [`phlex-d1-todo`](examples/phlex-d1-todo/) | <https://phlex-d1-todo.kazu-san.workers.dev/> | Ruby-native UI components in a Phlex-shaped DSL + Literal-shaped props, backed by D1 through `sequel-d1`. |
 | [`auth-otp`](examples/auth-otp/) | <https://auth-otp.kazu-san.workers.dev/login> | Email OTP login. Sends through [mailpit](https://mailpit.axllent.org/) in development; HMAC-signed session cookie; full headed Playwright E2E in `rake e2e:headed`. |
 | [`blog`](examples/blog/) | <https://blog.kazu-san.workers.dev/> | A small blog: index / detail / new / **proper 404** / delete. Demonstrates async-route status preservation and `<%= h(post[:body]).gsub("\n", "<br>") %>`. |
 | [`inertia-todo`](examples/inertia-todo/) | <https://inertia-todo.kazu-san.workers.dev/> | A thin SPA via [Inertia.js](https://inertiajs.com) + Vue 3, with Sinatra serving page props. Client-side JS lives in `public/assets/`. |

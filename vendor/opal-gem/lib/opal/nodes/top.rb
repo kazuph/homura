@@ -68,7 +68,7 @@ module Opal
       end
 
       def module_name
-        Opal::Compiler.module_name(compiler.file).inspect
+        Opal::Compiler.module_name(compiler.module_name || compiler.file).inspect
       end
 
       def definition

@@ -1,0 +1,17 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+ruby ">= 3.4.0"
+
+gem "rake"
+gem "opal-homura", path: "../../vendor/opal-gem", require: "opal"
+gem "homura-runtime", path: "../../gems/homura-runtime"
+gem "sinatra-homura", path: "../../gems/sinatra-homura"
+gem "sinatra-inertia", path: "../../gems/sinatra-inertia"
+gem "sequel-d1", path: "../../gems/sequel-d1"
+gem "sequel", "~> 5.0"
+gem "sqlite3", ">= 2.0"
+
+gem "phlex", "~> 2.4"
+gem "literal", "~> 1.0"

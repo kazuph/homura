@@ -6,20 +6,26 @@ require "tmpdir"
 $LOAD_PATH.unshift(File.expand_path("../gems/homura-runtime/lib", __dir__))
 require "homura/runtime/build_support"
 
-FakeSpec = Struct.new(:full_gem_path) do
+FakeSpec = Struct.new(:full_gem_path, :spec_name, :spec_metadata, :dependencies) do
   # `BuildSupport.opal_gem_paths` (added in homura-runtime 0.2.25)
   # iterates `Gem.loaded_specs.each_value` and reads `spec.name` /
   # `spec.metadata` to decide whether a gem opts in to the auto-await
   # pass. Unit-test FakeSpecs must expose the same surface so that
   # ordinary `loaded_specs:` lookup tests don't blow up.
   def name
-    full_gem_path.to_s.split("/").last.to_s
+    spec_name || full_gem_path.to_s.split("/").last.to_s
   end
 
   def metadata
-    {}
+    spec_metadata || {}
+  end
+
+  def runtime_dependencies
+    dependencies || []
   end
 end
+
+FakeDependency = Struct.new(:name)
 
 passed = 0
 failed = 0
@@ -203,6 +209,69 @@ ok = assert("standalone load paths do not require sinatra-homura") do
     end
 
     raise "missing #{runtime_lib}" unless load_paths.include?(runtime_lib)
+  end
+end
+
+passed += 1 if ok
+failed += 1 unless ok
+
+ok = assert("standalone load paths include supported Opal gem dependencies") do
+  Dir.mktmpdir do |dir|
+    runtime_root = File.join(dir, "runtime")
+    app_root = File.join(dir, "app")
+    phlex_root = File.join(dir, "phlex")
+    zeitwerk_root = File.join(dir, "zeitwerk")
+    [runtime_root, app_root, phlex_root, zeitwerk_root].each do |path|
+      FileUtils.mkdir_p(File.join(path, "lib"))
+    end
+
+    FileUtils.mkdir_p(File.join(runtime_root, "vendor"))
+
+    specs = {
+      "homura-runtime" => FakeSpec.new(runtime_root),
+      "phlex" => FakeSpec.new(
+        phlex_root,
+        "phlex",
+        {},
+        [FakeDependency.new("zeitwerk")]
+      ),
+      "zeitwerk" => FakeSpec.new(zeitwerk_root, "zeitwerk", {}, [])
+    }
+
+    load_paths = HomuraRuntime::BuildSupport.standalone_load_paths(
+      app_root,
+      with_db: false,
+      loaded_specs: specs
+    )
+
+    phlex_lib = File.join(phlex_root, "lib")
+    zeitwerk_lib = File.join(zeitwerk_root, "lib")
+    raise "missing #{phlex_lib}" unless load_paths.include?(phlex_lib)
+    raise "missing #{zeitwerk_lib}" unless load_paths.include?(zeitwerk_lib)
+  end
+end
+
+passed += 1 if ok
+failed += 1 unless ok
+
+ok = assert("writes Opal gem prelude for supported Zeitwerk gems") do
+  Dir.mktmpdir do |dir|
+    phlex_root = File.join(dir, "phlex")
+    FileUtils.mkdir_p(File.join(phlex_root, "lib"))
+    File.write(File.join(phlex_root, "lib", "phlex.rb"), "# phlex\n")
+    specs = {"phlex" => FakeSpec.new(phlex_root, "phlex", {}, [])}
+
+    prelude = HomuraRuntime::BuildSupport.write_opal_gems_prelude(
+      dir,
+      loaded_specs: specs
+    )
+    body = File.read(prelude)
+    unless body.include?("require \"phlex/opal_compat\"")
+      raise "missing phlex compat require: #{body}"
+    end
+
+    expected = "require_tree #{File.join(phlex_root, "lib").inspect}, autoload: true"
+    raise "missing #{expected}: #{body}" unless body.include?(expected)
   end
 end
 

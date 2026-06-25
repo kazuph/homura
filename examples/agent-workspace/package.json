@@ -1,0 +1,20 @@
+{
+  "name": "agent-workspace",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@cloudflare/shell": "^0.3.6",
+    "just-bash": "^2.14.4"
+  },
+  "scripts": {
+    "build": "bundle exec rake build",
+    "dev": "bundle exec rake dev",
+    "deploy": "bundle exec rake deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.99.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

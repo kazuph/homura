@@ -17,7 +17,9 @@ module Opal
     def read(path)
       full_path = expand(path)
       return nil if full_path.nil?
-      File.open(full_path, 'rb:UTF-8', &:read) if File.exist?(full_path)
+
+      readable_path = path_with_extension(full_path)
+      File.open(readable_path, 'rb:UTF-8', &:read) if readable_path
     end
 
     def expand(path)
@@ -41,6 +43,17 @@ module Opal
     end
 
     private
+
+    def path_with_extension(path)
+      return path if File.file?(path)
+
+      extensions.each do |extension|
+        candidate = "#{path}#{extension}"
+        return candidate if File.file?(candidate)
+      end
+
+      nil
+    end
 
     def find_path(path)
       pathname = Pathname(path)

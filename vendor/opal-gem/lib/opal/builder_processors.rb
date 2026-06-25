@@ -84,14 +84,18 @@ module Opal
 
       def compiled
         @compiled ||= Opal::Cache.fetch(@cache, cache_key) do
-          compiler = compiler_for(@source, file: @filename)
+          compiler = compiler_for(
+            @source,
+            file: @abs_path || @filename,
+            module_name: @filename
+          )
           compiler.compile
           compiler
         end
       end
 
       def cache_key
-        [self.class, @filename, @source, @options]
+        [self.class, @filename, @abs_path, @source, @options]
       end
 
       def compiler_for(source, options = {})

@@ -35,10 +35,19 @@ GEM
     ast (2.4.3)
     base64 (0.3.0)
     bigdecimal (4.1.2)
+    literal (1.9.0)
+      zeitwerk
     parser (3.3.11.1)
       ast (~> 2.4.1)
       racc
+    phlex (2.4.1)
+      refract (~> 1.0)
+      zeitwerk (~> 2.7)
+    prism (1.9.0)
     racc (1.8.1)
+    refract (1.1.0)
+      prism
+      zeitwerk
     sequel (5.103.0)
       bigdecimal
     sqlite3 (2.9.3-aarch64-linux-gnu)
@@ -51,6 +60,7 @@ GEM
     sqlite3 (2.9.3-x86_64-darwin)
     sqlite3 (2.9.3-x86_64-linux-gnu)
     sqlite3 (2.9.3-x86_64-linux-musl)
+    zeitwerk (2.8.2)
 
 PLATFORMS
   aarch64-linux-gnu
@@ -66,7 +76,9 @@ PLATFORMS
 
 DEPENDENCIES
   homura-runtime!
+  literal (~> 1.0)
   opal-homura!
+  phlex (~> 2.4)
   sequel-d1!
   sinatra-homura!
 

@@ -399,7 +399,11 @@
     }
 
     if ((cache = cref.$$const_cache) == null) {
-      $prop(cref, '$$const_cache', Object.create(null));
+      if (Object.prototype.hasOwnProperty.call(cref, '$$const_cache')) {
+        cref.$$const_cache = Object.create(null);
+      } else {
+        $prop(cref, '$$const_cache', Object.create(null));
+      }
       cache = cref.$$const_cache;
     }
     cached = cache[name];
@@ -424,7 +428,11 @@
     var cref = nesting[0], result, current_version = Opal.const_cache_version, cache, cached;
 
     if ((cache = nesting.$$const_cache) == null) {
-      $prop(nesting, '$$const_cache', Object.create(null));
+      if (Object.prototype.hasOwnProperty.call(nesting, '$$const_cache')) {
+        nesting.$$const_cache = Object.create(null);
+      } else {
+        $prop(nesting, '$$const_cache', Object.create(null));
+      }
       cache = nesting.$$const_cache;
     }
     cached = cache[name];
@@ -457,7 +465,7 @@
 
     cref.$$const = (cref.$$const || Object.create(null));
 
-    if (name in cref.$$const || ("$$autoload" in cref && name in cref.$$autoload)) {
+    if (name in cref.$$const) {
       new_const = false;
     }
 
@@ -2713,9 +2721,12 @@
   Opal.require_table   = {'corelib/runtime': true};
 
   Opal.normalize = function(path) {
-    var parts, part, new_parts = [], SEPARATOR = '/';
+    var parts, part, new_parts = [], SEPARATOR = '/', absolute;
 
-    if (Opal.current_dir !== '.') {
+    path = path.replace(/^file:\/\//, '');
+    absolute = path.charAt(0) === SEPARATOR;
+
+    if (!absolute && Opal.current_dir !== '.') {
       path = Opal.current_dir.replace(/\/*$/, '/') + path;
     }
 
@@ -2729,7 +2740,9 @@
       (part === '..') ? new_parts.pop() : new_parts.push(part)
     }
 
-    return new_parts.join(SEPARATOR);
+    path = new_parts.join(SEPARATOR);
+    if (!absolute && Opal.modules[SEPARATOR + path]) return SEPARATOR + path;
+    return absolute ? SEPARATOR + path : path;
   };
 
   Opal.loaded = function(paths) {

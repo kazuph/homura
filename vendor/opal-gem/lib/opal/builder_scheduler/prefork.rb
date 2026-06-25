@@ -55,7 +55,10 @@ module Opal
         # matching BuilderProcessor#. Builder needs to be passed so that
         # we can access an `expand_ext` function from its context.
         def expand_requires(requires, builder)
-          requires.map { |i| builder.expand_ext(i) }
+          requires.map do |i|
+            path = i.is_a?(Array) ? i.first : i
+            builder.expand_ext(path)
+          end
         end
 
         def build_require_order_array(requires, requires_hash, built_for = Set.new)

@@ -8,6 +8,11 @@ module HomuraRuntime
     RUNTIME_GEM_NAME = "homura-runtime"
     SINATRA_GEM_NAME = "sinatra-homura"
     SEQUEL_D1_GEM_NAME = "sequel-d1"
+    SUPPORTED_OPAL_ENTRY_GEMS = %w[phlex literal].freeze
+    OPAL_ENTRY_COMPAT_REQUIRES = {
+      "phlex" => "phlex/opal_compat",
+      "literal" => "literal/opal_compat"
+    }.freeze
 
     class << self
       def loaded_spec(name, loaded_specs: Gem.loaded_specs)
@@ -187,6 +192,10 @@ module HomuraRuntime
         out = []
         out.concat(path_gemfile_entries(project_root))
 
+        entry_specs = opal_entry_gem_specs(loaded_specs: loaded_specs)
+        out.concat(entry_specs.map { |spec| Pathname(spec.full_gem_path) if spec.full_gem_path }.compact)
+        out.concat(opal_dependency_paths(entry_specs, loaded_specs: loaded_specs))
+
         loaded_specs.each_value do |spec|
           next if wired.include?(spec.name)
           meta = spec.metadata
@@ -199,6 +208,78 @@ module HomuraRuntime
         end
 
         out.uniq
+      end
+
+      def opal_entry_gem_specs(loaded_specs: Gem.loaded_specs)
+        names = SUPPORTED_OPAL_ENTRY_GEMS + env_opal_gem_names
+        names.uniq.filter_map { |name| loaded_specs[name] }
+      end
+
+      def opal_dependency_paths(specs, loaded_specs: Gem.loaded_specs)
+        seen = {}
+        out = []
+        queue = specs.flat_map { |spec| spec.runtime_dependencies.map(&:name) }
+
+        until queue.empty?
+          name = queue.shift
+          next if seen[name]
+          seen[name] = true
+
+          spec = loaded_specs[name]
+          next unless spec&.full_gem_path
+
+          path = Pathname(spec.full_gem_path)
+          out << path if path.directory?
+          queue.concat(spec.runtime_dependencies.map(&:name))
+        end
+
+        out
+      end
+
+      def write_opal_gems_prelude(project_root, loaded_specs: Gem.loaded_specs)
+        entry_specs = opal_entry_gem_specs(loaded_specs: loaded_specs)
+        return nil if entry_specs.empty?
+
+        root = Pathname(project_root)
+        out = root.join("build", "homura_opal_gems.rb")
+        lines = ["# frozen_string_literal: true", ""]
+        entry_specs.each do |spec|
+          next unless spec.full_gem_path
+
+          lib = Pathname(spec.full_gem_path).join("lib")
+          next unless lib.directory?
+
+          lines << "require_tree #{lib.to_s.inspect}, autoload: true"
+        end
+
+        lines << ""
+        lines << "require \"zeitwerk/opal_compat\""
+        entry_specs.each do |spec|
+          compat = OPAL_ENTRY_COMPAT_REQUIRES[spec.name]
+          next unless compat && spec.full_gem_path
+
+          lib = Pathname(spec.full_gem_path).join("lib")
+          root_file = lib.join("#{spec.name}.rb")
+          next unless root_file.file?
+
+          root_require = root_file.to_s.delete_suffix(".rb")
+          lines << "Zeitwerk.__homura_next_gem_root = #{root_file.to_s.inspect}"
+          lines << "require #{root_require.inspect}"
+          lines << "`Opal.loaded([#{spec.name.inspect}])`"
+          lines << "require #{compat.inspect}"
+        end
+
+        FileUtils.mkdir_p(out.dirname)
+        File.write(out, lines.join("\n") << "\n")
+        out
+      end
+
+      def env_opal_gem_names(env = ENV)
+        env
+          .fetch("HOMURA_OPAL_GEMS", "")
+          .split(/[\s,]+/)
+          .map(&:strip)
+          .reject(&:empty?)
       end
 
       # Returns absolute Pathnames for every `path:`-declared gem in the

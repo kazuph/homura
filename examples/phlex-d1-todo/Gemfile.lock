@@ -1,0 +1,93 @@
+PATH
+  remote: ../../gems/homura-runtime
+  specs:
+    homura-runtime (0.3.8)
+      opal-homura (= 1.8.3.rc1.5)
+      parser (~> 3.3)
+
+PATH
+  remote: ../../gems/sequel-d1
+  specs:
+    sequel-d1 (0.3.1)
+      homura-runtime (~> 0.3)
+      opal-homura (= 1.8.3.rc1.5)
+      sequel (~> 5.0)
+      sqlite3 (~> 2.0)
+
+PATH
+  remote: ../../gems/sinatra-homura
+  specs:
+    sinatra-homura (0.3.2)
+      homura-runtime (>= 0.3.5, < 0.4)
+      opal-homura (= 1.8.3.rc1.5)
+
+PATH
+  remote: ../../vendor/opal-gem
+  specs:
+    opal-homura (1.8.3.rc1.5)
+      ast (>= 2.3.0)
+      base64 (>= 0.2.0)
+      parser (~> 3.0, >= 3.0.3.2)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    ast (2.4.3)
+    base64 (0.3.0)
+    bigdecimal (4.1.2)
+    literal (1.9.0)
+      zeitwerk
+    parser (3.3.11.1)
+      ast (~> 2.4.1)
+      racc
+    phlex (2.4.1)
+      refract (~> 1.0)
+      zeitwerk (~> 2.7)
+    prism (1.9.0)
+    racc (1.8.1)
+    rake (13.4.2)
+    refract (1.1.0)
+      prism
+      zeitwerk
+    sequel (5.105.0)
+      bigdecimal
+    sqlite3 (2.9.5-aarch64-linux-gnu)
+    sqlite3 (2.9.5-aarch64-linux-musl)
+    sqlite3 (2.9.5-arm-linux-gnu)
+    sqlite3 (2.9.5-arm-linux-musl)
+    sqlite3 (2.9.5-arm64-darwin)
+    sqlite3 (2.9.5-x86-linux-gnu)
+    sqlite3 (2.9.5-x86-linux-musl)
+    sqlite3 (2.9.5-x86_64-darwin)
+    sqlite3 (2.9.5-x86_64-linux-gnu)
+    sqlite3 (2.9.5-x86_64-linux-musl)
+    zeitwerk (2.8.2)
+
+PLATFORMS
+  aarch64-linux-gnu
+  aarch64-linux-musl
+  arm-linux-gnu
+  arm-linux-musl
+  arm64-darwin
+  x86-linux-gnu
+  x86-linux-musl
+  x86_64-darwin
+  x86_64-linux-gnu
+  x86_64-linux-musl
+
+DEPENDENCIES
+  homura-runtime!
+  literal (~> 1.0)
+  opal-homura!
+  phlex (~> 2.4)
+  rake
+  sequel (~> 5.0)
+  sequel-d1!
+  sinatra-homura!
+  sqlite3 (>= 2.0)
+
+RUBY VERSION
+   ruby 3.4.9p82
+
+BUNDLED WITH
+   2.6.9

@@ -1,0 +1,19 @@
+{
+  "name": "kagero-d1-todo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "mise exec -- bundle exec rake build",
+    "dev": "mise exec -- bundle exec rake dev",
+    "deploy": "direnv exec ../.. mise exec -- bundle exec rake deploy",
+    "db:migrate:compile": "mise exec -- bundle exec rake db:migrate:compile",
+    "db:migrate:local": "mise exec -- bundle exec rake db:migrate:local",
+    "db:migrate:remote": "direnv exec ../.. mise exec -- bundle exec rake db:migrate:remote"
+  },
+  "devDependencies": {
+    "wrangler": "^3.99.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

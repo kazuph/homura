@@ -14,7 +14,7 @@ class Module
   end
 end
 
-main = TOPLEVEL_BINDING.eval('self')
+main = `Opal.top`
 unless main.respond_to?(:ruby2_keywords, true)
   # call-seq:
   #    ruby2_keywords(method_name, ...)

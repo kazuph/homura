@@ -217,10 +217,6 @@ class ::Module
         }
         Opal.const_cache_version++;
         self.$$autoload[#{const}] = { path: #{path}, loaded: false, required: false, success: false, exception: false };
-
-        if (self.$const_added && !self.$const_added.$$pristine) {
-          self.$const_added(#{const});
-        }
       }
       return nil;
     }
@@ -375,6 +371,10 @@ class ::Module
     }
   end
 
+  def const_source_location(_name, _inherit = true)
+    nil
+  end
+
   def const_missing(name)
     full_const_name = self == ::Object ? name : "#{self}::#{name}"
 
@@ -472,6 +472,7 @@ class ::Module
 
     %x{
       if (!self.hasOwnProperty('$$base_module')) { $prop(self, '$$base_module', null); }
+      if (!self.hasOwnProperty('$$const_cache')) { $prop(self, '$$const_cache', null); }
 
       return $freeze(self);
     }
