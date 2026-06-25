@@ -25,6 +25,7 @@ module Pages
           input(type: "text", name: "title")
           button(type: "submit") { "Add" }
         end
+
         ul do
           @todos.each do |todo|
             li { todo.fetch(:title) }

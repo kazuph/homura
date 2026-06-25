@@ -27,12 +27,12 @@ class App < Sinatra::Base
 
     def todos
       db[:todos].order(Sequel.desc(:id)).all.map do |row|
-          {
-            id: row[:id],
-            title: row[:title],
-            done: done_value(row[:done]),
-            created_at: row[:created_at]
-          }
+        {
+          id: row[:id],
+          title: row[:title],
+          done: done_value(row[:done]),
+          created_at: row[:created_at]
+        }
       end
     end
 

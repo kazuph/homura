@@ -100,6 +100,7 @@ module Sinatra
           @fields.each do |field|
             output[field.name] = field.coerce(input, errors)
           end
+
           raise ValidationError, errors unless errors.empty?
 
           output

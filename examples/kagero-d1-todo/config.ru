@@ -2,4 +2,4 @@
 
 require_relative "app/app"
 
-run App
+run(App)

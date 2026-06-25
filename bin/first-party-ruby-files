@@ -26,7 +26,7 @@ end
 def ruby_shebang?(path)
   return false unless File.file?(path)
 
-  first_line = File.binread(path, 128).split("\n", 2).first.to_s
+  first_line = File.binread(path, 128).to_s.split("\n", 2).first.to_s
   first_line.start_with?("#!") && first_line.include?("ruby")
 rescue Errno::ENOENT, Errno::EISDIR
   false

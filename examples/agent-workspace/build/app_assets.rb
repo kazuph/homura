@@ -15,21 +15,21 @@ module AgentWorkspaceAssets
     end
 
     def call(env)
-      path = env['PATH_INFO']
+      path = env["PATH_INFO"]
       if (asset = AgentWorkspaceAssets::ASSETS[path])
         headers = {
-          'content-type'   => asset[:content_type],
-          'cache-control'  => 'public, max-age=3600',
+          "content-type" => asset[:content_type],
+          "cache-control" => "public, max-age=3600"
         }
         if asset[:binary]
           body = ::Cloudflare::EmbeddedBinaryBody.new(
             asset[:body_base64],
             asset[:content_type],
-            headers['cache-control']
+            headers["cache-control"]
           )
           [200, headers, [body.raw_response(200, headers)]]
         else
-          headers['content-length'] = asset[:body].bytesize.to_s
+          headers["content-length"] = asset[:body].bytesize.to_s
           [200, headers, [asset[:body]]]
         end
       else
@@ -41,5 +41,5 @@ end
 
 # Auto-install the middleware on Sinatra::Base if a real Sinatra app is loaded.
 if defined?(::Sinatra::Base) && ::Sinatra::Base.respond_to?(:use)
-  ::Sinatra::Base.use AgentWorkspaceAssets::Middleware
+  ::Sinatra::Base.use(AgentWorkspaceAssets::Middleware)
 end

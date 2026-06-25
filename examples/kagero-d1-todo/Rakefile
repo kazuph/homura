@@ -26,7 +26,7 @@ end
 task(:runtime) do
   FileUtils.mkdir_p("public/assets")
   FileUtils.cp(
-    "../../gems/sinatra-inertia/runtime/kagero.js",
+    "../../gems/sinatra-kagero/runtime/kagero.js",
     "public/assets/kagero.js"
   )
 end

@@ -331,9 +331,9 @@ module Components
                   ul(class: "todo-list") do
                     @todos.each do |todo|
                       render(
-                          TodoItem.new(
-                            id: integer_value(todo, :id),
-                            title: string_value(todo, :title),
+                        TodoItem.new(
+                          id: integer_value(todo, :id),
+                          title: string_value(todo, :title),
                           done: boolean_value(todo, :done)
                         )
                       )

@@ -294,11 +294,12 @@ npx skills add kazuph/homura --skill homura-workers-gems -a claude-code
 ## リポジトリ構成
 
 ```
-gems/                 # 公開している 4 つの gem はここ
+gems/                 # 公開している gem はここ
   homura-runtime/     # コアランタイム + ビルドパイプライン
   sinatra-homura/     # Sinatra ポート + Opal パッチ + scaffolder
   sequel-d1/          # Sequel D1 アダプタ + マイグレーションコンパイラ
   sinatra-inertia/    # Sinatra 向け Inertia.js v2 アダプタ
+  sinatra-kagero/     # Ruby Way な Inertia 体験レイヤー
 vendor/opal-gem/      # opal-homura（パッチ適用済み Opal フォーク）のソース
 vendor/                 # Workers 向けに同梱した Sinatra / Rack / Sequel 等
 examples/             # リリース済み gem を使うスタンドアロンサンプル群

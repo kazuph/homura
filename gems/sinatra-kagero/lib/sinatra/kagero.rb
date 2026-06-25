@@ -31,7 +31,7 @@ module Sinatra
       def redirect_page(path, page_class, **props)
         return render_kagero_page(page_class, props, url: path) if inertia_request?
 
-        redirect to(path), 303
+        redirect(to(path), 303)
       end
 
       private

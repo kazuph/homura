@@ -40,14 +40,10 @@ Gem::Specification.new do |spec|
   spec.metadata["homura.auto_await"] = "true"
 
   spec.files = Dir.chdir(__dir__) do
-    Dir["lib/**/*", "runtime/**/*", "README.md", "CHANGELOG.md", "LICENSE"].select do |f|
-      File.file?(f)
-    end
+    Dir["lib/**/*", "README.md", "CHANGELOG.md", "LICENSE"].select { |f| File.file?(f) }
   end
   spec.require_paths = ["lib"]
 
   spec.add_runtime_dependency("sinatra", ">= 3.0", "< 5.0")
   spec.add_runtime_dependency("rack", ">= 2.0", "< 4.0")
-  spec.add_runtime_dependency("phlex", ">= 2.4", "< 3.0")
-  spec.add_runtime_dependency("literal", ">= 1.0", "< 2.0")
 end

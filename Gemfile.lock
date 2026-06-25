@@ -22,6 +22,21 @@ PATH
       opal-homura (= 1.8.3.rc1.5)
 
 PATH
+  remote: gems/sinatra-inertia
+  specs:
+    sinatra-inertia (0.1.4)
+      rack (>= 2.0, < 4.0)
+      sinatra (>= 3.0, < 5.0)
+
+PATH
+  remote: gems/sinatra-kagero
+  specs:
+    sinatra-kagero (1.0.0.pre)
+      literal (>= 1.0, < 2.0)
+      phlex (>= 2.4, < 3.0)
+      sinatra-inertia (>= 0.1, < 2.0)
+
+PATH
   remote: vendor/opal-gem
   specs:
     opal-homura (1.8.3.rc1.5)
@@ -37,6 +52,9 @@ GEM
     bigdecimal (4.1.2)
     literal (1.9.0)
       zeitwerk
+    logger (1.7.0)
+    minitest (5.27.0)
+    mustermann (3.1.1)
     parser (3.3.11.1)
       ast (~> 2.4.1)
       racc
@@ -45,11 +63,28 @@ GEM
       zeitwerk (~> 2.7)
     prism (1.9.0)
     racc (1.8.1)
+    rack (3.2.6)
+    rack-protection (4.2.1)
+      base64 (>= 0.1.0)
+      logger (>= 1.6.0)
+      rack (>= 3.0.0, < 4)
+    rack-session (2.1.2)
+      base64 (>= 0.1.0)
+      rack (>= 3.0.0)
+    rack-test (2.2.0)
+      rack (>= 1.3)
     refract (1.1.0)
       prism
       zeitwerk
     sequel (5.103.0)
       bigdecimal
+    sinatra (4.2.1)
+      logger (>= 1.6.0)
+      mustermann (~> 3.0)
+      rack (>= 3.0.0, < 4)
+      rack-protection (= 4.2.1)
+      rack-session (>= 2.0.0, < 3)
+      tilt (~> 2.0)
     sqlite3 (2.9.3-aarch64-linux-gnu)
     sqlite3 (2.9.3-aarch64-linux-musl)
     sqlite3 (2.9.3-arm-linux-gnu)
@@ -60,6 +95,7 @@ GEM
     sqlite3 (2.9.3-x86_64-darwin)
     sqlite3 (2.9.3-x86_64-linux-gnu)
     sqlite3 (2.9.3-x86_64-linux-musl)
+    tilt (2.7.0)
     zeitwerk (2.8.2)
 
 PLATFORMS
@@ -77,10 +113,14 @@ PLATFORMS
 DEPENDENCIES
   homura-runtime!
   literal (~> 1.0)
+  minitest (~> 5.0)
   opal-homura!
   phlex (~> 2.4)
+  rack-test (~> 2.0)
   sequel-d1!
   sinatra-homura!
+  sinatra-inertia!
+  sinatra-kagero!
 
 RUBY VERSION
    ruby 3.4.9p82

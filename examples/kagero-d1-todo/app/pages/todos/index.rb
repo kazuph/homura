@@ -79,6 +79,7 @@ module Pages
                 p(id: "title-error", class: "error", role: "alert") { error_for(:title) }
               end
             end
+
             button(type: "submit", class: "button-primary") { "追加" }
           end
         end

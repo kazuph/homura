@@ -311,11 +311,12 @@ npx skills add kazuph/homura --skill homura-workers-gems -a claude-code
 ## Repository layout
 
 ```
-gems/                 # The four published gems live here
+gems/                 # The published gems live here
   homura-runtime/     # core runtime + build pipeline
   sinatra-homura/     # Sinatra port + Opal patches + scaffolder
   sequel-d1/          # Sequel D1 adapter + migration compiler
   sinatra-inertia/    # Inertia.js v2 adapter for Sinatra
+  sinatra-kagero/     # Ruby-way Inertia experience layer
 vendor/opal-gem/      # Source of opal-homura (the patched Opal fork)
 vendor/                 # Bundled Sinatra / Rack / Sequel / etc. for Workers
 examples/             # Standalone example apps consuming the released gems

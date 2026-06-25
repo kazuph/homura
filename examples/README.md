@@ -6,7 +6,7 @@ from RubyGems with no `path:` references back to the monorepo, so any
 of them can be copied out of this directory and shipped on its own.
 
 These apps are also the regression fixtures behind the latest gem
-releases — every Workers/Opal divergence the four gems absorb has at
+releases — every Workers/Opal divergence the Homura gem stack absorbs has at
 least one example that proves the standard Sinatra / Sequel / ERB
 idiom works the way the upstream docs say it does.
 
@@ -27,6 +27,7 @@ idiom works the way the upstream docs say it does.
 | [`todo/`](todo/) | Sinatra + D1 (no ORM) | <https://todo.kazu-san.workers.dev/> | Smallest D1 CRUD. `db.execute` / `db.execute_insert` directly — no Sequel. |
 | [`todo-orm/`](todo-orm/) | Sinatra + D1 + Sequel | <https://todo-orm.kazu-san.workers.dev/> | Same TODO domain through `sequel-d1`. Datasets, `.first`, `.update(... Sequel.lit ...)`, migration DSL → wrangler-ready SQL. |
 | [`phlex-d1-todo/`](phlex-d1-todo/) | Sinatra + D1 + Phlex-shaped Ruby components | <https://phlex-d1-todo.kazu-san.workers.dev/> | Ruby component classes render the whole UI, Literal-shaped props validate component inputs, and D1 persists TODOs. Stimulus only handles browser-only behavior. |
+| [`kagero-d1-todo/`](kagero-d1-todo/) | Sinatra + Kagero + D1 | <https://kagero-d1-todo.kazu-san.workers.dev/> | Ruby Page classes, props schemas, command validation, hidden Inertia-style navigation, partial reloads, history, and D1 mutations without userland JS. |
 | [`auth-otp/`](auth-otp/) | Sinatra + D1 + mailpit + Playwright | <https://auth-otp.kazu-san.workers.dev/login> | Email OTP login backed by a [mailpit](https://mailpit.axllent.org/) sink in development. HMAC-signed session cookie. `rake e2e` (Net::HTTP) and `rake e2e:headed` (real Chromium) for end-to-end verification. |
 | [`blog/`](blog/) | Sinatra + D1 (no ORM) | <https://blog.kazu-san.workers.dev/> | Index / detail / new / proper 404 / delete. Shows that `status 404; erb :posts_not_found` returns 404 — not 200 — under the async route pipeline. |
 | [`inertia-todo/`](inertia-todo/) | Sinatra + Inertia.js + Vue 3 | <https://inertia-todo.kazu-san.workers.dev/> | Server-rendered Inertia page object, `X-Inertia` content negotiation, JSON props. Client JS lives in `public/assets/inertia-app.js`. |

@@ -11,32 +11,35 @@ module Sinatra
         end
 
         def attribute(name, type = String, required: false, default: nil)
-          kagero_attributes << {
-            name: name.to_sym,
-            type: type,
-            required: required,
-            default: default
-          }
+          kagero_attributes <<
+            {
+              name: name.to_sym,
+              type: type,
+              required: required,
+              default: default
+            }
           attr_reader(name)
         end
 
         def validates_presence_of(*names, message: "is required")
           names.each do |name|
-            kagero_validations << {
-              kind: :presence,
-              name: name.to_sym,
-              message: message
-            }
+            kagero_validations <<
+              {
+                kind: :presence,
+                name: name.to_sym,
+                message: message
+              }
           end
         end
 
         def validates_length_of(name, maximum:, message: nil)
-          kagero_validations << {
-            kind: :length,
-            name: name.to_sym,
-            maximum: maximum,
-            message: message || "must be #{maximum} characters or less"
-          }
+          kagero_validations <<
+            {
+              kind: :length,
+              name: name.to_sym,
+              maximum: maximum,
+              message: message || "must be #{maximum} characters or less"
+            }
         end
 
         def kagero_attributes
@@ -72,10 +75,14 @@ module Sinatra
       end
 
       def to_h
-        self.class.kagero_attributes.map do |attribute|
-          name = attribute.fetch(:name)
-          [name, instance_variable_get(:"@#{name}")]
-        end.to_h
+        self
+          .class
+          .kagero_attributes
+          .map do |attribute|
+            name = attribute.fetch(:name)
+            [name, instance_variable_get(:"@#{name}")]
+          end
+          .to_h
       end
 
       private

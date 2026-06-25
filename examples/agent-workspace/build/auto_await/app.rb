@@ -137,7 +137,8 @@ Cloudflare::DurableObject.define(WORKSPACE_DO_CLASS) do |state, request|
       state: state,
       bucket_binding: bucket_binding,
       payload: {}
-    ).__await__
+    )
+      .__await__
   when ["POST", "/read"]
     workspace_backend_call!(
       "readFile",
@@ -146,7 +147,8 @@ Cloudflare::DurableObject.define(WORKSPACE_DO_CLASS) do |state, request|
       payload: {
         "path" => normalize_workspace_path(payload["path"], allow_root: false)
       }
-    ).__await__
+    )
+      .__await__
   when ["POST", "/command"]
     command = payload["command"].to_s
     if command.strip == "help"
@@ -162,7 +164,8 @@ Cloudflare::DurableObject.define(WORKSPACE_DO_CLASS) do |state, request|
         state: state,
         bucket_binding: bucket_binding,
         payload: {"command" => command}
-      ).__await__
+      )
+        .__await__
     end
   else
     [404, headers, {"error" => "Unknown workspace route #{request.method} #{request.path}"}.to_json]
@@ -194,12 +197,14 @@ def workspace_request(name, path, method: "GET", payload: nil)
 
   headers = payload ? {"content-type" => "application/json"} : nil
   body = payload ? payload.to_json : nil
-  response = stub.fetch(
-    "https://workspace.internal#{path}",
-    method: method,
-    headers: headers,
-    body: body
-  ).__await__
+  response = stub
+    .fetch(
+      "https://workspace.internal#{path}",
+      method: method,
+      headers: headers,
+      body: body
+    )
+    .__await__
   parsed = response.body.to_s.empty? ? {} : JSON.parse(response.body)
   [response, parsed, workspace]
 end
@@ -468,7 +473,8 @@ post("/shell") do
   content_type("text/html; charset=utf-8")
   workspace = normalize_workspace_name(params["workspace"])
   command = params["command"].to_s
-  response, payload, = workspace_request(workspace, "/command", method: "POST", payload: {"command" => command}).__await__
+  response, payload, = workspace_request(workspace, "/command", method: "POST", payload: {"command" => command})
+    .__await__
   status(response.status)
   snapshot = nil
   begin
@@ -513,7 +519,8 @@ post("/api/workspaces/:name/command") do
     "/command",
     method: "POST",
     payload: {"command" => command}
-  ).__await__
+  )
+    .__await__
   status(response.status)
   payload.to_json
 rescue JSON::ParserError
@@ -531,7 +538,8 @@ get("/workspaces/:name/files/*") do
     "/read",
     method: "POST",
     payload: {"path" => "/#{path}"}
-  ).__await__
+  )
+    .__await__
   status(response.status)
   if response.ok?
     content_type(payload["content_type"] || "text/plain; charset=utf-8")
