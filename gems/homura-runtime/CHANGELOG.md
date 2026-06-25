@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.13 (2026-06-25)
+
+- Load Phlex/Literal root code through Opal `require_tree` in the generated
+  prelude instead of absolute root-file `require`. This keeps their internal
+  relative requires resolvable in standalone Workers builds.
+
 ## 0.3.12 (2026-06-25)
 
 - Require Phlex/Literal root files with the explicit `.rb` path in the generated

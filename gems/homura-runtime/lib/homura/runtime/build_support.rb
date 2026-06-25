@@ -263,7 +263,7 @@ module HomuraRuntime
           next unless root_file.file?
 
           lines << "Zeitwerk.__homura_next_gem_root = #{root_file.to_s.inspect}"
-          lines << "require #{root_file.to_s.inspect}"
+          lines << "require_tree #{lib.to_s.inspect}"
           lines << "`Opal.loaded([#{spec.name.inspect}])`"
           lines << "require #{compat.inspect}"
         end
