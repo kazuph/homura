@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.20 (2026-06-25)
+
+- Define the Opal `ERB::Escape` shim under `class ERB`, matching Opal and
+  Ruby's ERB constant shape.
+
 ## 0.3.19 (2026-06-25)
 
 - Add an Opal `ERB::Escape.html_escape` shim before loading Phlex. Ruby 3.4

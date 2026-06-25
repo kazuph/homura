@@ -2,9 +2,8 @@
 
 require "erb"
 
-unless 
-ERB.const_defined?(:Escape, false)
-  module ERB
+unless ERB.const_defined?(:Escape, false)
+  class ERB
     module Escape
       def self.html_escape(value)
         ERB::Util.html_escape(value)
