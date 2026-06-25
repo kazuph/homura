@@ -3,6 +3,30 @@
 require "zeitwerk"
 
 module Zeitwerk
+  class HomuraOpalLoader
+    Inflector = Struct.new(:rules) do
+      def inflect(overrides)
+        rules.merge!(overrides)
+      end
+    end
+
+    attr_reader :inflector
+
+    def initialize
+      @inflector = Inflector.new({})
+    end
+
+    def ignore(*)
+    end
+
+    def collapse(*)
+    end
+
+    def setup
+      self
+    end
+  end
+
   class << self
     attr_accessor :__homura_next_gem_root
 
@@ -26,6 +50,8 @@ module Zeitwerk
       def for_gem(warn_on_extra_files: true)
         if (root_file = Zeitwerk.__homura_next_gem_root)
           Zeitwerk.__homura_next_gem_root = nil
+          return Zeitwerk::HomuraOpalLoader.new if RUBY_ENGINE == "opal"
+
           Registry.loader_for_gem(
             root_file,
             namespace: Object,

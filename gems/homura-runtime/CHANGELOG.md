@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.18 (2026-06-25)
+
+- Return a no-op Zeitwerk loader for Phlex/Literal when the generated bundle
+  runs on Opal. The gem tree is already compiled into the Worker, so runtime
+  loader setup must not inspect the original RubyGems filesystem path.
+
 ## 0.3.17 (2026-06-25)
 
 - Add Ruby LSP addon no-op stubs for published Phlex builds. The Workers
