@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.25 (2026-06-25)
+
+- Override Phlex element registration before loading HTML/SVG element modules.
+  The override uses `define_method` instead of string `class_eval`, avoiding
+  `opal-parser` in Worker bundles.
+
 ## 0.3.24 (2026-06-25)
 
 - Add a Phlex Opal compatibility shim for `String#name`. Phlex's element

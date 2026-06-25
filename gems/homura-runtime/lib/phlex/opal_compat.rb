@@ -4,8 +4,7 @@ require "corelib/pattern_matching"
 require "zeitwerk/opal_compat"
 require "phlex" unless defined?(Phlex)
 
-unless 
-String.method_defined?(:name)
+unless String.method_defined?(:name)
   class String
     def name
       self
@@ -33,6 +32,73 @@ end
 
 unless defined?(Phlex::SVG)
   class Phlex::SVG < Phlex::SGML
+  end
+end
+
+module Phlex::SGML::Elements
+  def register_element(method_name, tag: method_name.name.tr("_", "-"))
+    define_method(method_name) do |**attributes, &content|
+      state = @_state
+      buffer = state.buffer
+      has_content = !content.nil?
+
+      unless state.should_render?
+        content.call(self) if has_content
+        return nil
+      end
+
+      if attributes.length > 0
+        buffer << "<#{tag}"
+        __homura_normalize_comma_separated_tokens__(method_name, attributes)
+        buffer << (Phlex::ATTRIBUTE_CACHE[attributes] ||= Phlex::SGML::Attributes.generate_attributes(attributes))
+        buffer << ">"
+
+        if has_content
+          original_length = buffer.bytesize
+          rendered_content = content.call(self)
+          __implicit_output__(rendered_content) if original_length == buffer.bytesize
+          buffer << "</#{tag}>"
+        else
+          buffer << "</#{tag}>"
+        end
+      elsif has_content
+        buffer << "<#{tag}>"
+        original_length = buffer.bytesize
+        rendered_content = content.call(self)
+        __implicit_output__(rendered_content) if original_length == buffer.bytesize
+        buffer << "</#{tag}>"
+      else
+        buffer << "<#{tag}></#{tag}>"
+      end
+
+      flush if tag == "head"
+      nil
+    end
+
+    __registered_elements__[method_name] = tag
+    method_name
+  end
+
+  def __register_void_element__(method_name, tag: method_name.name.tr("_", "-"))
+    define_method(method_name) do |**attributes|
+      state = @_state
+      return unless state.should_render?
+
+      buffer = state.buffer
+      if attributes.length > 0
+        buffer << "<#{tag}"
+        __homura_normalize_comma_separated_tokens__(method_name, attributes)
+        buffer << (Phlex::ATTRIBUTE_CACHE[attributes] ||= Phlex::SGML::Attributes.generate_attributes(attributes))
+        buffer << ">"
+      else
+        buffer << "<#{tag}>"
+      end
+
+      nil
+    end
+
+    __registered_elements__[method_name] = tag
+    method_name
   end
 end
 
@@ -243,86 +309,6 @@ if defined?(Phlex::SGML)
       end
 
       new_buffer
-    end
-  end
-
-  module Phlex::SGML::Elements
-    def register_element(method_name, tag: method_name.name.tr("_", "-"))
-      define_method(method_name) do |**attributes, &content|
-        state = @_state
-        buffer = state.buffer
-        has_content = !content.nil?
-
-        unless state.should_render?
-          content.call(self) if has_content
-          return nil
-        end
-
-        if attributes.length > 0
-          buffer << "<#{tag}"
-          begin
-            __homura_normalize_comma_separated_tokens__(method_name, attributes)
-            buffer << (Phlex::ATTRIBUTE_CACHE[attributes] ||= Phlex::SGML::Attributes.generate_attributes(attributes))
-          ensure
-            buffer << ">"
-          end
-
-          if has_content
-            begin
-              original_length = buffer.bytesize
-              rendered_content = content.call(self)
-              __implicit_output__(rendered_content) if original_length == buffer.bytesize
-            ensure
-              buffer << "</#{tag}>"
-            end
-          else
-            buffer << "</#{tag}>"
-          end
-        elsif has_content
-          buffer << "<#{tag}>"
-          begin
-            original_length = buffer.bytesize
-            rendered_content = content.call(self)
-            __implicit_output__(rendered_content) if original_length == buffer.bytesize
-          ensure
-            buffer << "</#{tag}>"
-          end
-        else
-          buffer << "<#{tag}></#{tag}>"
-        end
-
-        flush if tag == "head"
-        nil
-      end
-
-      __registered_elements__[method_name] = tag
-      method_name
-    end
-
-    def __register_void_element__(method_name, tag: method_name.name.tr("_", "-"))
-      define_method(method_name) do |**attributes|
-        state = @_state
-        return unless state.should_render?
-
-        buffer = state.buffer
-
-        if attributes.length > 0
-          buffer << "<#{tag}"
-          begin
-            __homura_normalize_comma_separated_tokens__(method_name, attributes)
-            buffer << (Phlex::ATTRIBUTE_CACHE[attributes] ||= Phlex::SGML::Attributes.generate_attributes(attributes))
-          ensure
-            buffer << ">"
-          end
-        else
-          buffer << "<#{tag}>"
-        end
-
-        nil
-      end
-
-      __registered_elements__[method_name] = tag
-      method_name
     end
   end
 
