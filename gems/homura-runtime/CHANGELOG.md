@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.30 (2026-06-25)
+
+- Provide Opal-safe non-frozen Literal singleton type instances for
+  `AnyType`, `BooleanType`, `FalsyType`, `NeverType`, `TruthyType`, and
+  `VoidType`, avoiding constant-cache writes against frozen upstream objects.
+
 ## 0.3.29 (2026-06-25)
 
 - Provide an Opal-safe `Literal::Types::JSONDataType` shim instead of loading

@@ -7,22 +7,98 @@ require "literal/type"
 module Literal::Types
 end
 
-require "literal/types/any_type"
+class Literal::Types::AnyType
+  Instance = new
+
+  include Literal::Type
+
+  def inspect = "_Any"
+
+  def ===(value) = !(nil === value)
+
+  def >=(other, context: nil) = !(other === nil)
+end
+
+class Literal::Types::BooleanType
+  Instance = new
+
+  include Literal::Type
+
+  def inspect = "_Boolean"
+
+  def ===(value) = true == value || false == value
+
+  def >=(other, context: nil)
+    true == other || false == other || Literal::Types::BooleanType === other
+  end
+end
+
+class Literal::Types::FalsyType
+  Instance = new
+
+  include Literal::Type
+
+  def inspect = "_Falsy"
+
+  def ===(value) = !value
+
+  def >=(other, context: nil)
+    !other || Literal::Types::FalsyType === other
+  end
+end
+
+class Literal::Types::NeverType
+  Instance = new
+
+  include Literal::Type
+
+  def inspect = "_Never"
+
+  def ===(_value) = false
+
+  def >=(other, context: nil) = Literal::Types::NeverType === other
+
+  def <=(_other, context: nil) = true
+end
+
+class Literal::Types::TruthyType
+  Instance = new
+
+  include Literal::Type
+
+  def inspect = "_Truthy"
+
+  def ===(value) = !!value
+
+  def >=(other, context: nil)
+    true == other || Literal::Types::TruthyType === other
+  end
+end
+
+class Literal::Types::VoidType
+  Instance = new
+
+  include Literal::Type
+
+  def inspect = "_Void"
+
+  def ===(_value) = true
+
+  def >=(_other, context: nil) = true
+end
+
 require "literal/types/array_type"
-require "literal/types/boolean_type"
 require "literal/types/class_type"
 require "literal/types/constraint_type"
 require "literal/types/deferred_type"
 require "literal/types/descendant_type"
 require "literal/types/enumerable_type"
-require "literal/types/falsy_type"
 require "literal/types/frozen_type"
 require "literal/types/hash_type"
 require "literal/types/interface_type"
 require "literal/types/intersection_type"
 require "literal/types/kind_type"
 require "literal/types/map_type"
-require "literal/types/never_type"
 require "literal/types/nilable_type"
 require "literal/types/not_type"
 require "literal/types/predicate_type"
@@ -30,10 +106,8 @@ require "literal/types/range_type"
 require "literal/types/same_object_type"
 require "literal/types/set_type"
 require "literal/types/tagged_union_type"
-require "literal/types/truthy_type"
 require "literal/types/tuple_type"
 require "literal/types/union_type"
-require "literal/types/void_type"
 
 class Literal::Types::JSONDataType
   Instance = new
