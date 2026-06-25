@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.26 (2026-06-25)
+
+- Explicitly load the Literal type modules needed by component props under
+  Opal, including `_String`, `_Integer`, `_Boolean`, `_Symbol`, and `_Array`.
+
 ## 0.3.25 (2026-06-25)
 
 - Override Phlex element registration before loading HTML/SVG element modules.
