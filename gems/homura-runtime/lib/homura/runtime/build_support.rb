@@ -8,6 +8,7 @@ module HomuraRuntime
     RUNTIME_GEM_NAME = "homura-runtime"
     SINATRA_GEM_NAME = "sinatra-homura"
     SEQUEL_D1_GEM_NAME = "sequel-d1"
+    SEXP_PROCESSOR_GEM_NAME = "sexp_processor"
     SUPPORTED_OPAL_ENTRY_GEMS = %w[phlex literal].freeze
     OPAL_ENTRY_COMPAT_REQUIRES = {
       "phlex" => "phlex/opal_compat",
@@ -119,7 +120,8 @@ module HomuraRuntime
           gem_lib(RUNTIME_GEM_NAME, loaded_specs: loaded_specs),
           gem_vendor(RUNTIME_GEM_NAME, loaded_specs: loaded_specs),
           maybe_gem_lib(SINATRA_GEM_NAME, loaded_specs: loaded_specs),
-          maybe_gem_vendor(SINATRA_GEM_NAME, loaded_specs: loaded_specs)
+          maybe_gem_vendor(SINATRA_GEM_NAME, loaded_specs: loaded_specs),
+          maybe_gem_lib(SEXP_PROCESSOR_GEM_NAME, loaded_specs: loaded_specs)
         ].compact.each { |path| load_paths << path }
 
         if with_db

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.15 (2026-06-25)
+
+- Add `sexp_processor` to the runtime build dependencies and standalone Opal
+  load path. This satisfies Prism's RubyParser translation path when Phlex
+  compiler autoloads are touched during published-gem builds.
+
 ## 0.3.14 (2026-06-25)
 
 - Load Phlex/Literal root files as logical requires with explicit `.rb`
