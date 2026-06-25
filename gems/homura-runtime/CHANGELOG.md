@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.19 (2026-06-25)
+
+- Add an Opal `ERB::Escape.html_escape` shim before loading Phlex. Ruby 3.4
+  exposes this API, while Opal's ERB currently exposes the same behavior via
+  `ERB::Util.html_escape`.
+
 ## 0.3.18 (2026-06-25)
 
 - Return a no-op Zeitwerk loader for Phlex/Literal when the generated bundle

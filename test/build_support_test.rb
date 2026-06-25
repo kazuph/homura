@@ -266,6 +266,10 @@ ok = assert("writes Opal gem prelude for supported Zeitwerk gems") do
       loaded_specs: specs
     )
     body = File.read(prelude)
+    unless body.include?("require \"erb/opal_compat\"")
+      raise "missing erb compat require: #{body}"
+    end
+
     unless body.include?("require \"phlex/opal_compat\"")
       raise "missing phlex compat require: #{body}"
     end

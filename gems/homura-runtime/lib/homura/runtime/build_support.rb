@@ -253,6 +253,7 @@ module HomuraRuntime
         end
 
         lines << ""
+        lines << "require \"erb/opal_compat\""
         lines << "require \"zeitwerk/opal_compat\""
         entry_specs.each do |spec|
           compat = OPAL_ENTRY_COMPAT_REQUIRES[spec.name]
