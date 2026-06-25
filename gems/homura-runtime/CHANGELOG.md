@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.29 (2026-06-25)
+
+- Provide an Opal-safe `Literal::Types::JSONDataType` shim instead of loading
+  the upstream frozen singleton implementation, avoiding Opal constant-cache
+  writes against frozen objects during Worker boot.
+
 ## 0.3.28 (2026-06-25)
 
 - Bootstrap the `Literal::Types` namespace, load Literal's type classes, then

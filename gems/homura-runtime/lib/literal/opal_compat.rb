@@ -20,7 +20,6 @@ require "literal/types/frozen_type"
 require "literal/types/hash_type"
 require "literal/types/interface_type"
 require "literal/types/intersection_type"
-require "literal/types/json_data_type"
 require "literal/types/kind_type"
 require "literal/types/map_type"
 require "literal/types/never_type"
@@ -35,6 +34,28 @@ require "literal/types/truthy_type"
 require "literal/types/tuple_type"
 require "literal/types/union_type"
 require "literal/types/void_type"
+
+class Literal::Types::JSONDataType
+  Instance = new
+
+  include Literal::Type
+
+  def inspect = "_JSONData"
+
+  def ===(value)
+    case value
+    when String, Integer, Float, true, false, nil
+      true
+    when Hash
+      value.all? { |key, item| String === key && self === item }
+    when Array
+      value.all?(self)
+    else
+      false
+    end
+  end
+end
+
 require "literal/types"
 
 module Literal
