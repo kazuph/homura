@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.28 (2026-06-25)
+
+- Bootstrap the `Literal::Types` namespace, load Literal's type classes, then
+  load `literal/types`, matching Opal's eager module execution model.
+
 ## 0.3.27 (2026-06-25)
 
 - Load `literal/types` before individual Literal type classes in the Opal

@@ -3,14 +3,39 @@
 require "zeitwerk/opal_compat"
 require "literal" unless defined?(Literal)
 require "literal/type"
-require "literal/types"
+
+module Literal::Types
+end
+
 require "literal/types/any_type"
 require "literal/types/array_type"
 require "literal/types/boolean_type"
+require "literal/types/class_type"
 require "literal/types/constraint_type"
+require "literal/types/deferred_type"
+require "literal/types/descendant_type"
+require "literal/types/enumerable_type"
+require "literal/types/falsy_type"
+require "literal/types/frozen_type"
+require "literal/types/hash_type"
+require "literal/types/interface_type"
+require "literal/types/intersection_type"
+require "literal/types/json_data_type"
+require "literal/types/kind_type"
+require "literal/types/map_type"
+require "literal/types/never_type"
 require "literal/types/nilable_type"
+require "literal/types/not_type"
+require "literal/types/predicate_type"
+require "literal/types/range_type"
+require "literal/types/same_object_type"
+require "literal/types/set_type"
+require "literal/types/tagged_union_type"
+require "literal/types/truthy_type"
+require "literal/types/tuple_type"
 require "literal/types/union_type"
 require "literal/types/void_type"
+require "literal/types"
 
 module Literal
   class OpalBuffer
