@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.27 (2026-06-25)
+
+- Load `literal/types` before individual Literal type classes in the Opal
+  compatibility layer, so `Literal::Types` exists before the type files attach
+  constants to it.
+
 ## 0.3.26 (2026-06-25)
 
 - Explicitly load the Literal type modules needed by component props under

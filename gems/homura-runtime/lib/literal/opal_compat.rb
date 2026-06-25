@@ -3,6 +3,7 @@
 require "zeitwerk/opal_compat"
 require "literal" unless defined?(Literal)
 require "literal/type"
+require "literal/types"
 require "literal/types/any_type"
 require "literal/types/array_type"
 require "literal/types/boolean_type"
@@ -10,7 +11,6 @@ require "literal/types/constraint_type"
 require "literal/types/nilable_type"
 require "literal/types/union_type"
 require "literal/types/void_type"
-require "literal/types"
 
 module Literal
   class OpalBuffer
