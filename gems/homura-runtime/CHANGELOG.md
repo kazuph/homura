@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.35 (2026-06-25)
+
+- Bootstrap the `Literal::Properties` namespace before loading
+  `literal/properties/schema` under Opal.
+
 ## 0.3.34 (2026-06-25)
 
 - Explicitly load Literal property support before reopening

@@ -132,6 +132,10 @@ end
 
 require "literal/types"
 require "literal/property"
+
+module Literal::Properties
+end
+
 require "literal/properties/schema"
 require "literal/properties"
 
