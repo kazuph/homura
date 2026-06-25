@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5 — 2026-06-25
+
+- Extract the Ruby-way Kagero layer into the separate `sinatra-kagero` gem.
+- Keep `sinatra-inertia` focused on the Inertia v2 wire protocol.
+- Remove Phlex and Literal from the `sinatra-inertia` runtime dependency surface.
+
 ## 0.1.4 — 2026-05-03
 
 - Add the recommended Sinatra-native page API: `render 'Component', props`,
