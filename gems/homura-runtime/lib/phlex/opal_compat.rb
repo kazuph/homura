@@ -3,6 +3,16 @@
 require "corelib/pattern_matching"
 require "zeitwerk/opal_compat"
 require "phlex" unless defined?(Phlex)
+
+unless 
+String.method_defined?(:name)
+  class String
+    def name
+      self
+    end
+  end
+end
+
 require "phlex/error"
 require "phlex/errors/argument_error"
 require "phlex/errors/double_render_error"

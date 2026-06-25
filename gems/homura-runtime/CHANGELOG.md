@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.24 (2026-06-25)
+
+- Add a Phlex Opal compatibility shim for `String#name`. Phlex's element
+  registration receives method names as symbols on MRI, but Opal reports them
+  as strings in this path.
+
 ## 0.3.23 (2026-06-25)
 
 - Load Phlex SGML before SGML extension modules and bootstrap the HTML/SVG
