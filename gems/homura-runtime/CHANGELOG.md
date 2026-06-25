@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.9 (2026-06-25)
+
+- Add the Homura Opal gem prelude for published Phlex/Literal apps. The build
+  support now discovers the supported Opal entry gems, adds their runtime
+  dependencies such as Zeitwerk to the standalone load path, and emits
+  `build/homura_opal_gems.rb` so examples can compile against Rubygems packages
+  instead of monorepo `path:` gems.
+
 ## 0.3.8 (2026-05-06)
 
 - Discover and attach arbitrary Durable Object bindings from `env`, not just
