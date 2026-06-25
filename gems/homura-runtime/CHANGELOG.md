@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.31 (2026-06-25)
+
+- Extend component classes with `Literal::Types` when they extend
+  `Literal::Properties`, preserving helpers such as `_String` and `_Integer`
+  under Opal.
+
 ## 0.3.30 (2026-06-25)
 
 - Provide Opal-safe non-frozen Literal singleton type instances for

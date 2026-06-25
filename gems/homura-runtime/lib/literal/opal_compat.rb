@@ -172,6 +172,13 @@ module Literal
 end
 
 module Literal::Properties
+  def self.extended(base)
+    super
+    base.extend(Literal::Types)
+    base.include(DocString)
+    base.include(base.__send__(:__literal_extension__))
+  end
+
   private def __define_literal_methods__(new_property)
     extension = __literal_extension__
 
