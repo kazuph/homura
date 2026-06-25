@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.11 (2026-06-25)
+
+- Package the minimal Opal `monitor` shim required by Zeitwerk. This keeps
+  published Phlex/Literal examples buildable without depending on unpublished
+  `opal-homura` stdlib additions.
+
 ## 0.3.10 (2026-06-25)
 
 - Package the Phlex, Literal, and Zeitwerk Opal compatibility files in
