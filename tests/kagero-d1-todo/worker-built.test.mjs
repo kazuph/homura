@@ -179,7 +179,7 @@ test("POST routes mutate fake D1 and return the next Kagero page object", async 
         "X-Inertia": "true",
         "X-Inertia-Version": "kagero-1",
       },
-      body: new URLSearchParams({ title: "No userland JavaScript" }),
+      body: new URLSearchParams({ title: "日本語TODO" }),
     },
     env,
   );
@@ -187,9 +187,9 @@ test("POST routes mutate fake D1 and return the next Kagero page object", async 
   const createPage = await createResponse.json();
   assert.equal(createResponse.status, 200);
   assert.equal(createResponse.headers.get("X-Inertia"), "true");
-  assert.equal(env.DB.rows.at(-1).title, "No userland JavaScript");
+  assert.equal(env.DB.rows.at(-1).title, "日本語TODO");
   assert.equal(createPage.url, "/");
-  assert.match(createPage.props.kagero.html, /No userland JavaScript/);
+  assert.match(createPage.props.kagero.html, /日本語TODO/);
 
   const toggleResponse = await callWorker(
     "/todos/1/toggle",

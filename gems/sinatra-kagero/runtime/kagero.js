@@ -143,7 +143,15 @@ async function visit(url, options = {}) {
 function formBody(form) {
   const method = (form.getAttribute("method") || "GET").toUpperCase();
   if (method === "GET") return null;
-  return new FormData(form);
+
+  const enctype = (form.getAttribute("enctype") || "").toLowerCase();
+  const data = new FormData(form);
+  const hasFile = Array.from(data.values()).some((value) => value instanceof File);
+  if (enctype === "multipart/form-data" || hasFile) return data;
+
+  const params = new URLSearchParams();
+  for (const [key, value] of data.entries()) params.append(key, value);
+  return params;
 }
 
 function formUrl(form) {
