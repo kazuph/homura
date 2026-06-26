@@ -7,6 +7,76 @@ module Sinatra
         const root = document.querySelector("[data-kagero-root]");
         let currentPage = null;
         let currentScroll = { left: 0, top: 0 };
+        let pendingVisits = 0;
+        let loadingBar = null;
+
+        function ensureLoadingBar() {
+          if (loadingBar) return loadingBar;
+
+          const style = document.createElement("style");
+          style.textContent = `
+            #kagero-loading-bar {
+              position: fixed;
+              top: 0;
+              left: 0;
+              right: 0;
+              z-index: 2147483647;
+              height: 3px;
+              overflow: hidden;
+              pointer-events: none;
+              opacity: 0;
+              background: rgba(147, 197, 253, 0.24);
+              transition: opacity 120ms ease;
+            }
+
+            #kagero-loading-bar[data-active="true"] {
+              opacity: 1;
+            }
+
+            #kagero-loading-bar::before {
+              content: "";
+              position: absolute;
+              top: 0;
+              bottom: 0;
+              left: 0;
+              width: 48%;
+              background: linear-gradient(
+                90deg,
+                rgba(59, 130, 246, 0),
+                rgba(96, 165, 250, 0.35),
+                rgba(37, 99, 235, 0.9),
+                rgba(96, 165, 250, 0.35),
+                rgba(59, 130, 246, 0)
+              );
+              transform: translateX(-120%);
+              animation: kagero-loading-wave 700ms linear infinite;
+            }
+
+            @keyframes kagero-loading-wave {
+              from { transform: translateX(-120%); }
+              to { transform: translateX(260%); }
+            }
+          `;
+          document.head.appendChild(style);
+
+          loadingBar = document.createElement("div");
+          loadingBar.id = "kagero-loading-bar";
+          loadingBar.setAttribute("aria-hidden", "true");
+          document.body.appendChild(loadingBar);
+          return loadingBar;
+        }
+
+        function startLoading() {
+          pendingVisits += 1;
+          ensureLoadingBar().dataset.active = "true";
+        }
+
+        function finishLoading() {
+          pendingVisits = Math.max(0, pendingVisits - 1);
+          if (pendingVisits === 0 && loadingBar) {
+            loadingBar.dataset.active = "false";
+          }
+        }
 
         function readInitialPage() {
           if (!root) return null;
@@ -42,32 +112,37 @@ module Sinatra
 
         async function visit(url, options = {}) {
           rememberScroll();
+          startLoading();
           const headers = new Headers(options.headers || {});
           headers.set("X-Inertia", "true");
           headers.set("X-Inertia-Version", currentPage ? currentPage.version : "");
           headers.set("X-Requested-With", "XMLHttpRequest");
           headers.set("Accept", "application/json, text/html;q=0.9");
 
-          const response = await fetch(url, {
-            method: options.method || "GET",
-            body: options.body,
-            headers,
-            credentials: "same-origin",
-            redirect: "follow"
-          });
+          try {
+            const response = await fetch(url, {
+              method: options.method || "GET",
+              body: options.body,
+              headers,
+              credentials: "same-origin",
+              redirect: "follow"
+            });
 
-          if (response.status === 409 && response.headers.get("X-Inertia-Location")) {
-            location.href = response.headers.get("X-Inertia-Location");
-            return;
+            if (response.status === 409 && response.headers.get("X-Inertia-Location")) {
+              location.href = response.headers.get("X-Inertia-Location");
+              return;
+            }
+
+            if (!response.ok) throw new Error(`Kagero visit failed: ${response.status}`);
+
+            const page = await response.json();
+            applyPage(page, {
+              replace: options.replace === true,
+              preserveScroll: options.preserveScroll === true
+            });
+          } finally {
+            finishLoading();
           }
-
-          if (!response.ok) throw new Error(`Kagero visit failed: ${response.status}`);
-
-          const page = await response.json();
-          applyPage(page, {
-            replace: options.replace === true,
-            preserveScroll: options.preserveScroll === true
-          });
         }
 
         function formBody(form) {
