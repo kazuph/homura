@@ -15,6 +15,9 @@ Live site: <https://homura.kazu-san.workers.dev>
 > experiment, expect to chase the next minor, and treat the live demos
 > at `*.kazu-san.workers.dev` as dogfooding fixtures rather than SLA
 > targets.
+>
+> The plan for deleting this banner — the path to a production-normal
+> 1.0 — is laid out in [**ROADMAP.md**](ROADMAP.md).
 
 ```ruby
 # app.rb — yes, it really is plain Sinatra.
