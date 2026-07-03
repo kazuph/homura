@@ -1,0 +1,175 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "fileutils"
+require "json"
+require "open3"
+require "rubygems/package"
+require "tmpdir"
+require "uri"
+
+ROOT = File.expand_path("..", __dir__)
+
+GEM_TARGETS = [
+  ["opal-homura", "vendor/opal-gem", "opal.gemspec"],
+  ["homura-runtime", "gems/homura-runtime", "homura-runtime.gemspec"],
+  ["sinatra-homura", "gems/sinatra-homura", "sinatra-homura.gemspec"],
+  ["sequel-d1", "gems/sequel-d1", "sequel-d1.gemspec"],
+  ["sinatra-inertia", "gems/sinatra-inertia", "sinatra-inertia.gemspec"],
+  ["sinatra-kagero", "gems/sinatra-kagero", "sinatra-kagero.gemspec"]
+].freeze
+
+HOMURA_GEMS = GEM_TARGETS.map(&:first).freeze
+
+class CommandError < StandardError
+  attr_reader :output
+
+  def initialize(message, output)
+    super(message)
+    @output = output
+  end
+end
+
+def run!(argv, cwd:, env: {})
+  puts("$ #{argv.join(" ")}")
+  output, status = Open3.capture2e(env, *argv, chdir: cwd)
+  puts(output) unless output.empty?
+  raise CommandError.new("#{argv.join(" ")} failed in #{cwd}", output) unless status.success?
+end
+
+def error_type(error)
+  message = [error.message, error.respond_to?(:output) ? error.output : nil].compact.join("\n")
+  return "Bundler::GemNotFound" if message.include?("Bundler::GemNotFound")
+  return "LoadError" if message.include?("LoadError")
+  return "Opal" if message.match?(/\bOpal\b|opal/i)
+  return "Timeout" if message.match?(/timeout/i)
+  return "rake build" if message.include?("rake build")
+
+  error.class.name
+end
+
+def annotation_escape(value)
+  value
+    .to_s
+    .gsub("%", "%25")
+    .gsub("\r", "%0D")
+    .gsub("\n", "%0A")
+end
+
+def build_gems!(repo_dir)
+  gems_dir = File.join(repo_dir, "gems")
+  FileUtils.mkdir_p(gems_dir)
+
+  versions = {}
+
+  GEM_TARGETS.each do |name, workdir, gemspec|
+    out = Dir.mktmpdir("homura-gem-build-") do |build_dir|
+      artifact = File.join(build_dir, "#{name}.gem")
+      run!(["gem", "build", gemspec, "--output", artifact], cwd: File.join(ROOT, workdir))
+      spec = Gem::Package.new(artifact).spec
+      target = File.join(gems_dir, "#{spec.name}-#{spec.version}.gem")
+      FileUtils.cp(artifact, target)
+      versions[spec.name] = spec.version.to_s
+      target
+    end
+
+    puts("packed #{name}: #{out}")
+  end
+
+  run!(["gem", "generate_index", "--directory", repo_dir, "--quiet"], cwd: ROOT)
+  versions
+end
+
+def example_dirs
+  requested = ENV.fetch("HOMURA_PACKED_EXAMPLES", "").split(/[,\s]+/).reject(&:empty?)
+  dirs = if requested.empty?
+    Dir
+      .children(File.join(ROOT, "examples"))
+      .map { |name| File.join(ROOT, "examples", name) }
+      .select { |path| File.file?(File.join(path, "Gemfile")) }
+  else
+    requested.map { |name| File.expand_path(name, File.join(ROOT, "examples")) }
+  end
+
+  dirs.sort_by { |path| File.basename(path) }
+end
+
+def rewrite_gemfile!(example_dir, local_dir, gem_source_uri, versions)
+  source = File.read(File.join(example_dir, "Gemfile"))
+  used = []
+  kept = source.lines.reject do |line|
+    matched = HOMURA_GEMS.find { |name| line.match?(/^\s*gem\s+["']#{Regexp.escape(name)}["']/) }
+    used << matched if matched
+    matched
+  end
+
+  raise "#{example_dir} does not declare homura gems" if used.empty?
+
+  local_block = +"source #{gem_source_uri.inspect} do\n"
+  used.uniq.each do |name|
+    require_option = name == "opal-homura" ? ", require: \"opal\"" : ""
+    local_block << "  gem #{name.inspect}, #{versions.fetch(name).inspect}#{require_option}\n"
+  end
+
+  local_block << "end\n"
+
+  File.write(File.join(local_dir, "Gemfile"), "#{kept.join.rstrip}\n\n#{local_block}")
+  FileUtils.rm_f(File.join(local_dir, "Gemfile.lock"))
+end
+
+def build_example!(example_dir, workspace_dir, gem_source_uri, versions)
+  name = File.basename(example_dir)
+  target = File.join(workspace_dir, name)
+  FileUtils.mkdir_p(File.dirname(target))
+  FileUtils.cp_r("#{example_dir}/.", target)
+  rewrite_gemfile!(example_dir, target, gem_source_uri, versions)
+
+  env = {
+    "BUNDLE_GEMFILE" => File.join(target, "Gemfile"),
+    "BUNDLE_PATH" => File.join(target, ".bundle"),
+    "BUNDLE_WITHOUT" => "development"
+  }
+
+  run!(["bundle", "install"], cwd: target, env: env)
+  run!(["bundle", "exec", "rake", "build"], cwd: target, env: env)
+end
+
+def main
+  base_dir = ENV["HOMURA_PACKED_TMPDIR"] || Dir.mktmpdir("homura-packed-examples-")
+  keep = ENV["HOMURA_PACKED_KEEP"] == "1" || ENV.key?("HOMURA_PACKED_TMPDIR")
+  gem_repo = File.join(base_dir, "gem-repo")
+  workspace = File.join(base_dir, "examples")
+  FileUtils.mkdir_p(gem_repo)
+  FileUtils.mkdir_p(workspace)
+
+  versions = build_gems!(gem_repo)
+  gem_source_uri = "file://#{URI::DEFAULT_PARSER.escape(gem_repo)}"
+  dirs = example_dirs
+  raise "no examples selected" if dirs.empty?
+
+  failures = []
+  dirs.each do |dir|
+    puts("\n==> packed-gem build: examples/#{File.basename(dir)}")
+    build_example!(dir, workspace, gem_source_uri, versions)
+  rescue => e
+    failures << [dir, e]
+    name = File.basename(dir)
+    type = error_type(e)
+    message = e.message.lines.first.to_s.strip
+    warn("::error file=examples/#{annotation_escape(name)}::#{annotation_escape(type)}: #{annotation_escape(message)}")
+    warn("FAILED examples/#{name}: #{e.message}")
+  end
+
+  if failures.empty?
+    puts("\n#{dirs.length} packed-gem example builds passed")
+  else
+    warn("\n#{failures.length} packed-gem example builds failed")
+    failures.each { |dir, e| warn("- examples/#{File.basename(dir)}: #{e.message}") }
+    exit(1)
+  end
+
+ensure
+  FileUtils.rm_rf(base_dir) if defined?(base_dir) && !keep
+end
+
+main
