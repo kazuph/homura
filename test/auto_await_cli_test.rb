@@ -120,9 +120,10 @@ Dir.mktmpdir do |dir|
   passed += 1 if ok
   failed += 1 unless ok
 
-  ok = assert("auto-await still skips unchanged sync-only files") do
+  ok = assert("auto-await copies unchanged sync-only files") do
     plain = File.join(output_dir, "plain.rb")
-    raise "unexpected rewritten sync file" if File.exist?(plain)
+    raise "missing copied sync file" unless File.exist?(plain)
+    raise File.read(plain) unless File.read(plain) == File.read(File.join(input_dir, "plain.rb"))
   end
 
   passed += 1 if ok
