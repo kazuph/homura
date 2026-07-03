@@ -38,6 +38,34 @@ jobs:
         run: npm test
 
   # ---------------------------------------------------------------------------
+  # Packed gem example gate — M1 requires catching the difference between the
+  # monorepo path: workspace and the artifacts RubyGems users actually install.
+  # This job builds the same .gem files the release workflow would push, rewrites
+  # each example's Homura gem pins to a local gem source in a temp copy, and then
+  # runs `bundle exec rake build` there. If a gemspec omits files or an example
+  # only works through path: assumptions, the PR fails before release.
+  # ---------------------------------------------------------------------------
+  packed-gem-examples:
+    name: packed gems build all examples
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Cache packed example bundle downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.bundle/cache
+          key: packed-examples-${{ hashFiles('gems/*/*.gemspec', 'vendor/opal-gem/opal.gemspec') }}
+      - name: Build examples against packed gems
+        run: npm run test:packed-examples
+
+  # ---------------------------------------------------------------------------
   # Ruby formatting gate — keeps first-party Ruby on the same rubyfmt lineage
   # used in Stripe's rollout story, while explicitly excluding vendored /
   # generated trees from the formatter scope.
