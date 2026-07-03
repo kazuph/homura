@@ -27,7 +27,6 @@ jobs:
       - uses: actions/checkout@v5
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
           bundler-cache: true
       - uses: actions/setup-node@v5
         with:
@@ -79,7 +78,6 @@ jobs:
       - uses: actions/checkout@v5
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
           bundler-cache: true
       - name: Install rubyfmt
         run: ruby bin/install-rubyfmt
@@ -98,8 +96,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
       - name: Install test deps
         run: |
           cat > /tmp/test-Gemfile <<'EOF'
@@ -153,8 +149,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
       - name: Parse all .rb files
         run: |
           set -euo pipefail
