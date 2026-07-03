@@ -9,9 +9,8 @@
 #   ruby auto-await --input app --output build/auto_await/app
 #
 # The output directory mirrors the input. Files that need no change
-# are skipped entirely (not copied), so the consumer can place the
-# output directory earlier on the Opal load path and fall back to
-# the original input for unchanged files.
+# are copied unchanged so consumers can place the output directory
+# earlier on the Opal load path without changing require resolution.
 
 require "fileutils"
 require "pathname"
@@ -95,6 +94,9 @@ paths.each do |path|
 
     if nodes.empty? && !needs_magic_only_output
       puts("[auto-await] skip (no changes) #{rel}") if options[:debug]
+      out_path = output_root.join(rel)
+      FileUtils.mkdir_p(out_path.dirname)
+      File.write(out_path, source)
       skipped += 1
       next
     end
