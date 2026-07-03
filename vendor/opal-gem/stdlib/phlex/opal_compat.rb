@@ -4,6 +4,37 @@ require "corelib/pattern_matching"
 require "zeitwerk/opal_compat"
 require "phlex" unless defined?(Phlex)
 
+unless String.method_defined?(:name)
+  class String
+    def name
+      self
+    end
+  end
+end
+
+require "phlex/error"
+require "phlex/errors/argument_error"
+require "phlex/errors/double_render_error"
+require "phlex/errors/name_error"
+require "phlex/errors/runtime_error"
+require "phlex/helpers"
+require "phlex/sgml"
+require "phlex/sgml/safe_object"
+require "phlex/sgml/safe_value"
+require "phlex/sgml/state"
+require "phlex/sgml/attributes"
+require "phlex/sgml/elements"
+
+unless defined?(Phlex::HTML)
+  class Phlex::HTML < Phlex::SGML
+  end
+end
+
+unless defined?(Phlex::SVG)
+  class Phlex::SVG < Phlex::SGML
+  end
+end
+
 Phlex::SGML
 Phlex::SGML::State
 Phlex::SGML::Attributes
