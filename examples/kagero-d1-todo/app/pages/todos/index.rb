@@ -27,6 +27,7 @@ module Pages
             end
           end
 
+          kagero_link(href: "/done") { "完了済み" }
           render_flash
           render_stats
           render_form

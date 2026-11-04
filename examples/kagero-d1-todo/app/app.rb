@@ -5,9 +5,9 @@ require "sinatra/kagero"
 require "sequel"
 require "commands/create_todo"
 require "pages/todos/index"
+require "pages/todos/done"
 
 class App < Sinatra::Base
-  set :inertia_csrf_protection, false
   register Sinatra::Kagero
 
   set :page_version, ENV.fetch("ASSETS_VERSION", "kagero-1")
@@ -83,6 +83,10 @@ class App < Sinatra::Base
       errors: page_errors || {},
       flash: flash_payload
     )
+  end
+
+  get "/done" do
+    page(Pages::Todos::Done, todos: todos.select { |todo| todo[:done] })
   end
 
   post "/todos" do

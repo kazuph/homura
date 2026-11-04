@@ -146,10 +146,13 @@ test("GET / renders Kagero shell with Ruby Page HTML and hidden runtime", async 
 
 test("X-Inertia GET returns a page object with Kagero html props", async () => {
   const env = createEnv();
+  const initial = await callWorker("/", {}, env);
+  const token = initial.headers.get("set-cookie").match(/XSRF-TOKEN=([^;]+)/)[1];
   const response = await callWorker(
     "/",
     {
       headers: {
+        Cookie: `XSRF-TOKEN=${token}`,
         "X-Inertia": "true",
         "X-Inertia-Version": "kagero-1",
       },
@@ -170,11 +173,16 @@ test("X-Inertia GET returns a page object with Kagero html props", async () => {
 test("POST routes mutate fake D1 and return the next Kagero page object", async () => {
   const env = createEnv();
 
+  const initial = await callWorker("/", {}, env);
+  const token = initial.headers.get("set-cookie").match(/XSRF-TOKEN=([^;]+)/)[1];
+  const csrf = { Cookie: `XSRF-TOKEN=${token}`, "X-XSRF-TOKEN": token };
+
   const createResponse = await callWorker(
     "/todos",
     {
       method: "POST",
       headers: {
+        ...csrf,
         "content-type": "application/x-www-form-urlencoded",
         "X-Inertia": "true",
         "X-Inertia-Version": "kagero-1",
@@ -195,7 +203,7 @@ test("POST routes mutate fake D1 and return the next Kagero page object", async 
     "/todos/1/toggle",
     {
       method: "POST",
-      headers: { "X-Inertia": "true", "X-Inertia-Version": "kagero-1" },
+      headers: { ...csrf, "X-Inertia": "true", "X-Inertia-Version": "kagero-1" },
     },
     env,
   );
@@ -207,7 +215,7 @@ test("POST routes mutate fake D1 and return the next Kagero page object", async 
     "/todos/2/delete",
     {
       method: "POST",
-      headers: { "X-Inertia": "true", "X-Inertia-Version": "kagero-1" },
+      headers: { ...csrf, "X-Inertia": "true", "X-Inertia-Version": "kagero-1" },
     },
     env,
   );
@@ -231,4 +239,14 @@ test("version mismatch returns Inertia 409 hard-reload signal", async () => {
 
   assert.equal(response.status, 409);
   assert.equal(response.headers.get("X-Inertia-Location"), "https://example.test/");
+});
+
+test("POST without CSRF header is rejected without mutation", async () => {
+  const env = createEnv();
+  const initial = await callWorker("/", {}, env);
+  const token = initial.headers.get("set-cookie").match(/XSRF-TOKEN=([^;]+)/)[1];
+  const before = env.DB.rows.length;
+  const response = await callWorker("/todos", { method: "POST", headers: { Cookie: `XSRF-TOKEN=${token}` }, body: new URLSearchParams({ title: "rejected" }) }, env);
+  assert.equal(response.status, 403);
+  assert.equal(env.DB.rows.length, before);
 });
