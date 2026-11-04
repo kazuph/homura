@@ -43,11 +43,13 @@ module Sinatra
         body_html = page_instance.call
 
         response_props = page_props.merge(
-          kagero: {
-            component: component,
-            html: body_html,
-            title: page_instance.kagero_title
-          }
+          kagero: Sinatra::Inertia.always(
+            {
+              component: component,
+              html: body_html,
+              title: page_instance.kagero_title
+            }
+          )
         )
 
         if inertia_request?
@@ -72,11 +74,11 @@ module Sinatra
             <head>
               <meta charset="utf-8">
               <meta name="viewport" content="width=device-width,initial-scale=1">
-              <title>#{::Rack::Utils.escape_html(props.dig(:kagero, :title).to_s)}</title>
+              <title>#{::Rack::Utils.escape_html(page_hash.dig(:props, :kagero, :title).to_s)}</title>
               <script type="module">#{Sinatra::Kagero::Runtime::SOURCE}</script>
             </head>
             <body>
-              <main id="#{::Rack::Utils.escape_html(settings.kagero_root_id)}" data-kagero-root data-page="#{page_json}">#{props.dig(:kagero, :html)}</main>
+              <main id="#{::Rack::Utils.escape_html(settings.kagero_root_id)}" data-kagero-root data-page="#{page_json}">#{page_hash.dig(:props, :kagero, :html)}</main>
             </body>
           </html>
         HTML

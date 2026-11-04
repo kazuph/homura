@@ -91,13 +91,19 @@ function rememberScroll() {
   }
 }
 
-function applyPage(page, { replace = false, preserveScroll = false } = {}) {
+function renderPage(page) {
   if (!root) return;
   const html = pageHtml(page);
   if (typeof html === "string") root.innerHTML = html;
   root.setAttribute("data-page", JSON.stringify(page));
   currentPage = page;
+  if (page.props.kagero && typeof page.props.kagero.title === "string") {
+    document.title = page.props.kagero.title;
+  }
+}
 
+function applyPage(page, { replace = false, preserveScroll = false } = {}) {
+  renderPage(page);
   const state = { kagero: true, page, scroll: preserveScroll ? currentScroll : { left: 0, top: 0 } };
   if (replace) history.replaceState(state, "", page.url);
   else history.pushState(state, "", page.url);
@@ -105,8 +111,25 @@ function applyPage(page, { replace = false, preserveScroll = false } = {}) {
   if (!preserveScroll) window.scrollTo(0, 0);
 }
 
+function showFailure() {
+  let notice = document.getElementById("kagero-visit-error");
+  if (!notice) {
+    notice = document.createElement("div");
+    notice.id = "kagero-visit-error";
+    notice.setAttribute("role", "alert");
+    document.body.prepend(notice);
+  }
+  notice.textContent = "操作に失敗しました。もう一度お試しください。";
+}
+
 async function visit(url, options = {}) {
-  rememberScroll();
+  const method = (options.method || "GET").toUpperCase();
+  const targetUrl = new URL(url, location.href);
+  if (targetUrl.origin !== location.origin) {
+    if (method === "GET") location.href = targetUrl.href;
+    else showFailure();
+    return;
+  }
   startLoading();
   const headers = new Headers(options.headers || {});
   headers.set("X-Inertia", "true");
@@ -114,27 +137,61 @@ async function visit(url, options = {}) {
   headers.set("X-Requested-With", "XMLHttpRequest");
   headers.set("Accept", "application/json, text/html;q=0.9");
 
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    const cookie = document.cookie.split("; ").find((entry) => entry.startsWith("XSRF-TOKEN="));
+    if (cookie) headers.set("X-XSRF-TOKEN", decodeURIComponent(cookie.slice("XSRF-TOKEN=".length)));
+  }
+
   try {
     const response = await fetch(url, {
-      method: options.method || "GET",
+      method,
       body: options.body,
       headers,
       credentials: "same-origin",
+      mode: "same-origin",
       redirect: "follow"
     });
 
+    if (new URL(response.url).origin !== location.origin) throw new Error("Cross-origin response");
+
     if (response.status === 409 && response.headers.get("X-Inertia-Location")) {
-      location.href = response.headers.get("X-Inertia-Location");
+      const destination = new URL(response.headers.get("X-Inertia-Location"), location.href);
+      const current = new URL(location.href);
+      destination.hash = "";
+      current.hash = "";
+      if (destination.href === current.href) location.reload();
+      else location.href = response.headers.get("X-Inertia-Location");
       return;
     }
 
     if (!response.ok) throw new Error(`Kagero visit failed: ${response.status}`);
 
-    const page = await response.json();
+    let page = await response.json();
+    if (!page || typeof page.component !== "string" || typeof page.url !== "string" ||
+        typeof page.version !== "string" || !page.props || typeof page.props !== "object" ||
+        Array.isArray(page.props) || !page.props.kagero ||
+        typeof page.props.kagero.html !== "string" || typeof page.props.kagero.title !== "string") {
+      throw new Error("Invalid page");
+    }
+    const pageUrl = new URL(page.url, location.href);
+    if (!["http:", "https:"].includes(pageUrl.protocol) || pageUrl.origin !== location.origin) {
+      throw new Error("Invalid page URL");
+    }
+    const partialComponent = headers.get("X-Inertia-Partial-Component");
+    if (partialComponent) {
+      if (!currentPage || partialComponent !== currentPage.component) return;
+      if (partialComponent === page.component) {
+        page = { ...page, props: { ...currentPage.props, ...page.props } };
+      }
+    }
+    rememberScroll();
+    document.getElementById("kagero-visit-error")?.remove();
     applyPage(page, {
       replace: options.replace === true,
       preserveScroll: options.preserveScroll === true
     });
+  } catch (error) {
+    showFailure();
   } finally {
     finishLoading();
   }
@@ -171,6 +228,7 @@ document.addEventListener("click", (event) => {
 
   const link = target.closest("a[data-kagero]");
   if (link) {
+    if (new URL(link.href, location.href).origin !== location.origin) return;
     event.preventDefault();
     visit(link.href, {
       replace: link.dataset.kageroReplace === "true",
@@ -197,6 +255,7 @@ document.addEventListener("submit", (event) => {
   if (!target || !target.closest) return;
   const form = target.closest("form[data-kagero]");
   if (!form) return;
+  if (new URL(form.action, location.href).origin !== location.origin) return;
 
   event.preventDefault();
   visit(formUrl(form), {
@@ -208,9 +267,7 @@ document.addEventListener("submit", (event) => {
 
 window.addEventListener("popstate", (event) => {
   if (event.state && event.state.kagero && event.state.page) {
-    currentPage = event.state.page;
-    const html = pageHtml(currentPage);
-    if (typeof html === "string") root.innerHTML = html;
+    renderPage(event.state.page);
     const scroll = event.state.scroll || { left: 0, top: 0 };
     window.scrollTo(scroll.left, scroll.top);
   } else {
