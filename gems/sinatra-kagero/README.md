@@ -34,3 +34,15 @@ end
 Kagero intentionally keeps JavaScript out of the main application authoring
 surface. The client runtime exists, but route handlers, pages, props, forms,
 validation, and persistence remain Ruby.
+
+## CSRF protection and partial reloads
+
+With Inertia CSRF protection enabled, Kagero sends the `XSRF-TOKEN` cookie
+in the `X-XSRF-TOKEN` header for same-origin unsafe requests. A normal form
+submission without JavaScript cannot send this header and receives HTTP 403.
+
+Partial reloads select the props transferred; Kagero renders and replaces the
+whole HTML page. Props omitted from the partial response retain their old values.
+
+Direct `Kagero.visit` calls navigate to external origins only for GET; other
+methods show an error and do not send a request.

@@ -36,11 +36,11 @@ module Pages
   end
 end
 
-def make_kagero_app(version: "1", &routes)
+def make_kagero_app(version: "1", csrf: false, &routes)
   Class.new(Sinatra::Base) do
     set(:host_authorization, permitted_hosts: [])
     set(:protection, except: %i[remote_token session_hijacking http_origin])
-    set(:inertia_csrf_protection, false)
+    set(:inertia_csrf_protection, csrf)
     register(Sinatra::Kagero)
     set(:page_version, version)
     instance_exec(&routes)
@@ -61,6 +61,7 @@ class KageroTest < Minitest::Test
 
     get("/")
     assert_equal(200, last_response.status)
+    assert_includes(last_response.body, "<title>Todos</title>")
     assert_includes(last_response.body, "<h1>Todos</h1>")
     assert_includes(last_response.body, "Ship Kagero")
     assert_includes(last_response.body, "data-kagero-root")
@@ -104,6 +105,67 @@ class KageroTest < Minitest::Test
     assert_equal("/", payload["url"])
     assert_equal("Saved", payload.dig("props", "notice"))
     assert_includes(payload.dig("props", "kagero", "html"), "Created")
+  end
+
+  def test_partial_only_and_except_always_return_kagero_html
+    @app = make_kagero_app do
+      get("/") { page(Pages::TodosIndex, todos: [{title: "Partial"}], notice: "Notice") }
+    end
+
+    header("X-Inertia", "true")
+    header("X-Inertia-Version", "1")
+    header("X-Inertia-Partial-Component", "TodosIndex")
+    header("X-Inertia-Partial-Data", "notice")
+    get("/")
+    props = JSON.parse(last_response.body).fetch("props")
+    assert_equal("Notice", props["notice"])
+    refute(props.key?("todos"))
+    assert_includes(props.dig("kagero", "html"), "Partial")
+    header("X-Inertia-Partial-Data", nil)
+    header("X-Inertia-Partial-Except", "todos")
+    get("/")
+    props = JSON.parse(last_response.body).fetch("props")
+    refute(props.key?("todos"))
+    assert_includes(props.dig("kagero", "html"), "Partial")
+  end
+
+  def test_runtime_source_matches_javascript_file
+    assert_equal(
+      File.read(File.expand_path("../runtime/kagero.js", __dir__), encoding: "UTF-8"),
+      Sinatra::Kagero::Runtime::SOURCE
+    )
+  end
+
+  def test_first_inertia_get_returns_headers_and_csrf_cookie
+    @app = make_kagero_app(csrf: true) do
+      get("/") { page(Pages::TodosIndex, todos: []) }
+    end
+
+    header("X-Inertia", "true")
+    header("X-Inertia-Version", "1")
+    get("/")
+    assert_equal(200, last_response.status)
+    assert_equal("true", last_response.headers["X-Inertia"])
+    assert_match(/XSRF-TOKEN=/, last_response.headers["Set-Cookie"])
+  end
+
+  def test_csrf_requires_matching_header
+    @app = make_kagero_app(csrf: true) do
+      get("/") { "ok" }
+      post("/") { "ok" }
+    end
+
+    get("/")
+    token = rack_mock_session.cookie_jar["XSRF-TOKEN"]
+    refute_nil(token)
+    post("/")
+    assert_equal(403, last_response.status)
+    header("X-XSRF-TOKEN", "incorrect")
+    post("/")
+    assert_equal(403, last_response.status)
+    header("X-XSRF-TOKEN", token)
+    post("/")
+    assert_equal(200, last_response.status)
   end
 
   def test_page_props_validate_required_values

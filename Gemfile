@@ -1,6 +1,6 @@
 source "https://rubygems.org"
 
-ruby "3.4.9"
+ruby "3.4.12"
 
 # Root Gemfile — gem development workspace.
 # This is the dev-mode Bundler context for the homura monorepo
